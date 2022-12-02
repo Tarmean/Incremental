@@ -1,0 +1,72 @@
+# This YAML file describes your package. Stack will automatically generate a
+# Cabal file when you run `stack build`. See the hpack website for help with
+# this file: <https://github.com/sol/hpack>.
+name: Incremental
+version: '0.0.0'
+github: "githubuser/Incremental"
+license: MIT
+author: "Author name here"
+maintainer: "Author name here"
+# synopsis: A new Haskeleton package.
+# description: Incremental is a new Haskeleton package.
+# category: Other
+
+extra-source-files:
+- CHANGELOG.md
+- LICENSE.md
+- package.yaml
+- README.md
+- stack.yaml
+
+ghc-options: -Wall -XGHC2021
+
+library:
+  dependencies:
+  - base
+  - mtl
+  - containers
+  - data-reify
+  - deriving-trans
+  - syb
+  - prettyprinter
+  source-dirs: library
+
+executables:
+  Incremental:
+    source-dirs: executable
+    main: Main.hs
+    dependencies:
+    - base
+    - Incremental
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
+
+benchmarks:
+  Incremental-benchmarks:
+    source-dirs: benchmark
+    main: Main.hs
+    dependencies:
+    - base
+    - Incremental
+    - criterion
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
+
+tests:
+  Incremental-test-suite:
+    source-dirs: test-suite
+    main: Main.hs
+    dependencies:
+    - base
+    - Incremental
+    - hspec
+    - tasty
+    - tasty-hspec
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
