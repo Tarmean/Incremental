@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DerivingVia #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 module Rewrites where
 
 import CompileQuery
@@ -17,24 +18,28 @@ import Data.Bifunctor (Bifunctor(..))
 import Data.Functor.Identity
 import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
+import Data.Semigroup (Max(..))
 
 recompExprType :: TypeEnv -> ScopeEnv -> Expr -> ExprType
 recompExprType env scope (Ref v) = fromMaybe AnyType (scope LM.!? tyData v <|> tableTys env LM.!? tyData v)
 recompExprType _env _scope (Proj _ i v) = case etyOf v of
-  Tuple ls -> ls !! i
+  TupleTyp ls -> ls !! i
   _ -> error "Projection of non-tuple"
 recompExprType _env _scope (BOp _ op _ _) = case op of
     Eql -> EBase $ typeRep (Proxy :: Proxy Bool)
+recompExprType _ _ _ = AnyType
+
 recompLangType :: Lang' a -> ExprType
 recompLangType = \case
   Comprehend _ _ _ _ _ e -> etyOf e
   Return e -> etyOf e
+  _ -> AnyType
 
 recompTypes :: TopLevel -> TopLevel
 recompTypes e0 =  outLevel
   where
      outLevel = runReader (runT t e0) LM.empty
-     out = TE (LM.fromList [ (k, ltyOf v) | (Source k,v) <- LM.toList (defs e0) ]) (LM.fromList [ (k, ltyOf v) | (k,(_args, v)) <- LM.toList (funs e0) ])
+     out = TE (LM.fromList [ (unSource k, ltyOf v) | (k,(_args, v)) <- LM.toList (defs e0) ]) mempty
      t =
          trans (\rec -> \case
            (w@Comprehend {cBound}::Lang) -> recompLang <$> local (M.union $ boundEnv cBound) (rec w)
@@ -51,6 +56,8 @@ recompTypes e0 =  outLevel
         scope <- ask
         pure $ setExprType e (recompExprType out scope e)
 
+instance FreeVars Lang where
+   freeVars = freeVarsQ
 setLangType :: Lang' a -> ExprType -> Lang' a
 setLangType l t = case l of
   Comprehend {} -> l { eTyp = t }
@@ -104,22 +111,34 @@ overBody :: Functor m => (Expr -> m Expr) -> Out -> m Out
 overBody f a = Out (target a) <$> f (expr a)
 
 type LiftFuns m = StateT (M.Map Fun ([Local], Lang)) (VarGenT m)
-runLiftFuns :: Monad m => TopLevel -> VarGenT m TopLevel
-runLiftFuns tl = do
-   fresh <- flip execStateT M.empty $ onRecurseActive tl
-   pure $ tl { funs = M.union fresh (funs tl) }
-onRecurseActive :: Monad m => TopLevel -> LiftFuns m TopLevel
-onRecurseActive = runT $
-  recurse >>> trans_ collectionArgToFun
+maxVar :: Data a => a -> Int
+maxVar = getMax . runQ (
+     query (\rec -> \case
+       Ref @Var v -> Max (uniq (tyData v))
+       a -> rec a)
+ ||| recurse)
+
+withVarGenT :: Monad m => Int -> VarGenT m a -> m a
+withVarGenT i = flip evalStateT i . runVarGenT
+
+nestedToThunks :: TopLevel -> TopLevel
+nestedToThunks tl = runIdentity $ runT (trans_ collectionArgToFun ||| recurse) tl
   where
-    collectionArgToFun :: Monad m => SomeArg -> LiftFuns m SomeArg
-    collectionArgToFun (CollArg l)
-        | frees <- S.toList (freeVarsQ l)
-        , not (null frees) = do
-           v <- Fun <$> genVar "F"
-           modify (M.insert v (frees, l))
-           pure (ThunkArg v AnyType (fmap Ref frees))
+    argsOf :: Var -> [Local]
+    argsOf v = case LM.lookup (Source v) (defs tl) of
+      Just (args, _) -> args
+      Nothing -> error "Undefined function"
+    collectionArgToFun :: SomeArg -> Identity SomeArg
+    collectionArgToFun (CollArg l) = pure (ThunkArg (Source l) AnyType (fmap Ref (argsOf l)))
     collectionArgToFun other = pure other
+
+    -- aggrToFun :: Monad m => Expr -> LiftFuns m Expr
+    -- aggrToFun (Aggr op r)
+    --     | frees <- S.toList (freeVarsQ r)
+    --     , not (null frees) = do
+    --        v <- Fun <$> genVar "F"
+    --        modify (M.insert v (frees, l))
+    --        pure (ThunkArg v AnyType (fmap Ref frees))
 
     -- hoistFuncs (Thunk f es) = do
     --     (vs, l) <- gets (M.! f)

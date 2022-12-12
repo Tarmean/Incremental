@@ -9,13 +9,13 @@ import CompileQuery
 import Data.Foldable (Foldable(foldl'))
 import Data.Data (Data)
 import GHC.Stack (HasCallStack)
-import Prettyprinter (Pretty (pretty))
+import Prettyprinter (Pretty (pretty), align)
 import Control.Monad.Identity (Identity(Identity))
 import Data.Coerce (coerce)
-import Data.Text.Prettyprint.Doc (align)
 import qualified Data.Set as S
-import Debug.Trace (traceShow)
-import Test (testQ, testFlat)
+import Test (testFlat)
+import Rewrites (freeVarsQ)
+import Data.Bifunctor (second)
 
 
 newtype MonoidMap k v = MonoidMap { unMonoidMap :: M.Map k v }
@@ -95,7 +95,7 @@ analyzeArity = runQ $
     a -> rec a)
  &&&
   query (\rec -> \case
-    (c@Comprehend {..}::Lang' Var) -> 
+    (Comprehend {..}::Lang' Var) -> 
       MonoidMap (M.fromListWith (<>) [ (tyData v, Once) | (_,v) <- cBound ])
     a -> rec a )
  &&&
@@ -104,8 +104,7 @@ analyzeArity = runQ $
         rec :: Data a => a -> MonoidMap Var Usage
         rec = rec' . Identity
         defUsage = M.mapKeys unSource (M.map rec defs)
-        funUsage = M.mapKeys unFun (M.map rec funs)
-        recs = fixTransitive @_ @Usage $ coerce (defUsage <>  funUsage)
+        recs = fixTransitive @_ @Usage $ coerce defUsage
       in MonoidMap (recs M.! unSource root))
  &&& recurse
 
@@ -114,6 +113,7 @@ m !!! k = case M.lookup k m of
   Nothing -> error $ "Key not found: " ++ show k ++ ", in map: " ++ show m
   Just o -> o
 
+tester :: IO ()
 tester = do
   let tl = toTopLevel testFlat
   let !mults  = analyzeArity tl
@@ -121,12 +121,13 @@ tester = do
 
 
 simpleBind :: Lang' Var -> Bool
+simpleBind (Return _) = True
 simpleBind (Comprehend [(a,_)] [] [] [] _ (Ref c))
   | tyData c == a = True
 simpleBind _ = False
 
 simpleBinds :: TopLevel -> [Source]
-simpleBinds (TopLevel {..}) = map fst . filter (simpleBind .snd) $ M.toList defs
+simpleBinds (TopLevel {..}) = map fst . filter (simpleBind . snd . snd) $ M.toList defs
 
 withArity :: Usage -> MonoidMap Var Usage -> [Var]
 withArity us (MonoidMap m) = map fst . filter ((==us) . snd) $ M.toList m
@@ -134,23 +135,37 @@ withArity us (MonoidMap m) = map fst . filter ((==us) . snd) $ M.toList m
 
 dropUseless :: MonoidMap Var Usage -> TopLevel -> TopLevel
 dropUseless arities tl = tl {
-    defs = M.filterWithKey (\k _ -> S.notMember (unSource k) useless) (defs tl),
-    funs = M.filterWithKey (\k _ -> S.notMember (unFun k) useless) (funs tl)
+    defs = M.filterWithKey (\k _ -> S.notMember (unSource k) useless) (defs tl)
  }
   where
     useless = S.fromList $ withArity None arities
 
+localsFor :: [(Var, Typed Var)] -> Var -> [Var]
+localsFor binds v 
+  | null out = [] -- error ("No locals for " ++ show v ++ " in " ++ show binds)
+  | otherwise = out
+  where out = [localN | (localN,globalN) <- binds, tyData globalN == v]
+
 inlineComp :: Lang -> Var -> Lang -> Lang
 inlineComp (Comprehend {..}) v (Return r)
-  = Comprehend { cLet = cLet ++ [(v,r)], .. }
+  = Comprehend { cLet = cLet ++ newLet, .. }
+  where
+    locals = localsFor cBound v
+    newLet
+     = if null locals 
+       then [(v,r)]
+       else [(v',r) | v' <- locals]
 inlineComp l@Comprehend{} var r@Comprehend{} = Comprehend {
     cBound = cBound l <> cBound r,
     cPred = cPred l <> cPred r,
     cPred2 = cPred2 l <> cPred2 r,
     eTyp = mergeTyp (eTyp l) (mergeTyp r),
-    cLet = cLet l <> cLet r <> [(var, cOut r)],
+    cLet = cLet l <> cLet r <> [(var', cOut r) | var' <- notNull $ localsFor (cBound l) var],
     cOut = cOut l
   }
+  where
+    notNull [] = error "localsFor returned empty list"
+    notNull xs = xs
 inlineComp _ _ _ = error "Illegal merge"
 
 mergeTyp :: p1 -> p2 -> p1
@@ -158,28 +173,36 @@ mergeTyp a _ = a
 
 
 inlineLang :: M.Map Var Lang -> Lang -> Lang
-inlineLang binds c@Comprehend {} = inlined
+inlineLang binds c@Comprehend {} = out
   where
-    relevant = S.fromList $ filter (`M.member` binds) $ map (tyData . snd) $ cBound c
-    c' = c { cBound = filter ((`S.notMember` relevant) . tyData . snd) $ cBound c }
-    inlined = foldl' (uncurry . inlineComp) c' [ (v, binds !!! v) | v <- S.toList relevant ]
+    out = case inlined of
+      Comprehend {..} -> Comprehend { cBound = dropIrrelevant cBound, ..}
+      _ -> error "impossible"
+    dropIrrelevant = filter ((`M.notMember` relevant) . tyData . snd)
+    frees = S.map tyData (freeVarsQ c)
+    relevant = M.filterWithKey (\k _ -> k `S.member` frees)  binds
+    inlined = foldl' (uncurry . inlineComp) c (M.toList relevant)
 inlineLang _ a = a
 
 doInlines :: MonoidMap Var Usage -> TopLevel -> TopLevel
 doInlines arities tl = tl {
-    defs = M.filterWithKey (\k _ -> unSource k `M.notMember` inlines) $ M.map (inlineLang inlines) (defs tl)
+    defs = M.filterWithKey (\k _ -> unSource k `M.notMember` inlines) $ M.map (second (inlineLang inlines)) (defs tl)
     -- funs = M.map (inlineLang inlines) (funs tl)
  }
   where inlines = gatherInlines arities tl
-gatherInlines :: Show a => MonoidMap Var Usage -> TopLevel' a -> M.Map Var a
+gatherInlines :: MonoidMap Var Usage -> TopLevel -> M.Map Var Lang
 gatherInlines arities tl = inlines
-  where inlines = M.fromList [ (v, def) | v <- withArity Once arities, Just def <- [defs tl M.!? Source v]]
+  where
+    toInline = simples <> withArity Once arities
+    inlines = M.fromList [ (v, def) | v <- toInline, Just (_args, def) <- [defs tl M.!? Source v], inlinable def]
+    simples = unSource <$> simpleBinds tl
+
+inlinable :: Lang' Var -> Bool
+inlinable (Comprehend {}) = True
+inlinable (Return {}) = True
+inlinable _ = False
+
 
 optPass :: TopLevel -> TopLevel
 optPass tl = doInlines multiplicities $ dropUseless multiplicities tl
   where multiplicities = analyzeArity tl
--- inlineUnique
--- multUsages :: M.Map Var Usages -> Var -> M.Map Var Usage
--- multUsages us = [ (v, ms)  | (v, ms) <- M.toList us, (ve, m) <- M.toList ms ]
-
--- anaUsage :: 

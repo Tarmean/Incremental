@@ -7,32 +7,32 @@ packages:
 - completed:
     hackage: deriving-trans-0.5.0.1@sha256:440393dc84bace19152c20618d445b76812341887d08d24fdfb53156aa51ea87,2293
     pantry-tree:
-      size: 611
       sha256: f1200322ee7318433388a19dacc02f2f1aa818bbd1c35db918b6b6dbeeacaff9
+      size: 611
   original:
     hackage: deriving-trans-0.5.0.1@sha256:440393dc84bace19152c20618d445b76812341887d08d24fdfb53156aa51ea87,2293
 - completed:
     hackage: monad-control-identity-0.2.0.0@sha256:1ec0ec32b6e29d53481b576ecf2ea71d35d309a013fd9640918d4cfaa63f4e7f,1452
     pantry-tree:
-      size: 338
       sha256: eff5352a22ded5838d7212630c9252fcfa9f65df453277f9ec6ccedd813e3550
+      size: 338
   original:
     hackage: monad-control-identity-0.2.0.0@sha256:1ec0ec32b6e29d53481b576ecf2ea71d35d309a013fd9640918d4cfaa63f4e7f,1452
 - completed:
+    commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
+    git: https://github.com/Tarmean/data-reify.git
     name: data-reify
-    version: 0.6.3
-    git: https://github.com/Tarmean/data-reify.git
     pantry-tree:
-      size: 1214
       sha256: ba064925256d51dd96e14d25bda7164b9696e352d6ad9181e8f8c53c401a6b9c
-    commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
+      size: 1214
+    version: 0.6.3
   original:
-    git: https://github.com/Tarmean/data-reify.git
     commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
+    git: https://github.com/Tarmean/data-reify.git
 snapshots:
 - completed:
+    sha256: 5201b267da5c16bde723e0401eed332c96035edd55250a947089a7d9417b7ecc
     size: 646690
     url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2022/11/3.yaml
-    sha256: 5201b267da5c16bde723e0401eed332c96035edd55250a947089a7d9417b7ecc
   original:
     url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2022/11/3.yaml
