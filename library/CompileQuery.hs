@@ -1,6 +1,5 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -85,7 +84,7 @@ type SomeArg = SomeArg' Var
 --   deriving (Eq, Ord, Show, Data)
 data Typed a = Typed { tyData :: a, tyType :: ExprType }
   deriving (Eq, Ord, Show, Data, Functor, Foldable, Traversable)
-data Expr' p = Ref (Typed p)
+data Expr' p = Ref p
              | Proj ExprType Int (Expr' p)
              | BOp ExprType BOp (SomeArg' p) (SomeArg' p)
              | Unit
@@ -134,14 +133,8 @@ newtype Uniq = Uniq Int
 data BOp = Eql
   deriving (Eq, Ord, Show, Data)
 data Lang' (t :: Type) where
-  Comprehend :: {
-      cBound :: [(Var, Typed t)],
-      cLet :: [(Var, Expr' t)],
-      cPred :: [Expr' t],
-      cPred2 :: [Expr' t],
-      eTyp :: ExprType,
-      cOut :: Expr' t
-    } -> Lang' t
+  Bind :: { boundExpr ::  t, boundVar :: Var, boundBody :: Lang' t} -> Lang' t
+  Filter :: Expr' t -> Lang' t -> Lang' t
   Return :: (Expr' t) -> Lang' t
   OpLang :: OpLang t -> Lang' t
   -- | LOp LOp (Typed t) (Typed t)
@@ -163,7 +156,7 @@ newtype Fun = Fun { unFun :: Var}
 data Out' p = Out { target :: Source, expr :: Expr' p }
   deriving (Eq, Ord, Show, Data)
 type Out = Out' Var
-type Local = Typed Var
+type Local = Var
 data TopLevel' p = TopLevel {
   defs :: M.Map Source ([Local], p),
   root :: Source
@@ -200,33 +193,35 @@ instance Pretty a => Pretty (Expr' a) where
     pretty (Aggr op v) = pretty op <> "(" <>  pretty v <> ")"
     pretty (Tuple es) = tupled (map pretty es)
 instance Pretty a => Pretty (Lang' a) where
-    pretty (Comprehend bs lets ps ps2 t e) =
+    pretty (Bind a b c) = "for" <+> pretty b <+> "in" <+> pretty a <+> braces (pretty c)
+    pretty (Filter p c) = "when" <+> parens (pretty p) <+> pretty c
+    -- pretty (Comprehend bs lets ps ps2 t e) =
             
         
-            align(
-                "for" <+>
-                pBinds bs <>
-                hcat [
-            pList "let" lets, 
-            pList "where" ps ,
-            pList "where2" ps2
-             ] <> pOut e <> pTyp t)
-      where
-        pBinds out = align (hsep . punctuate "," . map pBind $ out) <> line
-        pBind (v, t) = pretty v <+> "in" <+> pretty t
-        pList _ [] = mempty
-        pList s ls =  s <+> pretty ls <> line
-        pTyp AnyType = mempty
-        pTyp t = " ::" <+> pretty t
-        pOut e = " yield" <+> pretty e
-    pretty (Return e) = "Return" <+> pretty e
+    --         align(
+    --             "for" <+>
+    --             pBinds bs <>
+    --             hcat [
+    --         pList "let" lets, 
+    --         pList "where" ps ,
+    --         pList "where2" ps2
+    --          ] <> pOut e <> pTyp t)
+    --   where
+    --     pBinds out = align (hsep . punctuate "," . map pBind $ out) <> line
+    --     pBind (v, t) = pretty v <+> "in" <+> pretty t
+    --     pList _ [] = mempty
+    --     pList s ls =  s <+> pretty ls <> line
+    --     pTyp AnyType = mempty
+    --     pTyp t = " ::" <+> pretty t
+    --     pOut e = " yield" <+> pretty e
+    pretty (Return e) = "yield" <+> pretty e
     pretty (OpLang o) = "OpLang" <+> pretty o
 instance Pretty a => Pretty (OpLang a) where
     pretty (Opaque s) = "Opaque" <+> pretty s
     pretty (Union a b) = "Union" <+> pretty a <+> pretty b
-instance Pretty a => Pretty (Typed a) where
-    pretty (Typed a AnyType) = pretty a
-    pretty (Typed a t) = pretty a <> "::" <> pretty t
+-- instance Pretty a => Pretty (Typed a) where
+--     pretty (Typed a AnyType) = pretty a
+--     pretty (Typed a t) = pretty a <> "::" <> pretty t
 instance Pretty a => Pretty (TopLevel' a) where
     pretty (TopLevel ds root) = "let " <> align (vsep (prettyAssignments ds)) <> line <> "in " <> pretty root
       where
@@ -241,10 +236,13 @@ prettyS = renderString . layoutPretty defaultLayoutOptions . pretty
 pprint :: Pretty a => a -> IO ()
 pprint = putStrLn . prettyS
 
+-- FIXME: shouldn't abstract over toplevel vars into account.
 class FreeVars s where
-    freeVars :: s -> S.Set Local
+    freeVars :: s -> S.Set Var
 instance (FreeVars Lang, Monad m) => MonadGlobals RecLang (StateT (TopLevel' Lang) m)  where
   tellGlobal k v = modify' $ \tl -> tl { defs = M.insert (Source k) (S.toList $ freeVars v, v) (defs tl) }
+-- instance FreeVars Lang where
+--   freeVars = mempty
 
 export :: (MonadGlobals RecLang m, MonadRef m) => Lang' Var ->  m Var
 export val = do
@@ -253,11 +251,11 @@ export val = do
     doOnce key (tellGlobal @RecLang name val)
     pure name
 
-labelFor :: FreeVars (Lang' p) => Lang' p -> String
-labelFor (OpLang (Opaque s)) = s  <> "s"
-labelFor c@Comprehend {} 
-  | freeVars c /= S.empty = "f"
-labelFor _ = "v"
+-- labelFor :: FreeVars (Lang' p) => Lang' p -> String
+-- labelFor (OpLang (Opaque s)) = s  <> "s"
+-- labelFor c@Comprehend {} 
+--   | freeVars c /= S.empty = "f"
+-- labelFor _ = "v"
 doOnce :: MonadRef m => Unique -> m () -> m ()
 doOnce key m = do
     seen <- wasVisited key
@@ -267,44 +265,70 @@ doOnce key m = do
 
 normalize :: forall m. (MonadGlobals RecLang m, MonadRef m) => RecLang -> m Var
 normalize (VRef v) = pure v
-normalize (RecLang (Return (Ref o))) = normalize (tyData o)
+normalize (RecLang (Return (Ref o))) = normalize o
 normalize w@(RecLang l) = do
   key <- stableName w
   let var = Var key "v"
   doOnce key (tellGlobal @RecLang var =<< traverse normalize l)
   pure var
-normalize w@(Bound r k) = do
+
+
+normalize w@(Bound a f) = do
   key <- stableName w
   let var = Var key "v"
-  doOnce key (tellGlobal @RecLang var =<< go [] [] (Bound r k))
+  doOnce key $ do
+    l <- freshName
+    let local = Var l "l"
+    head <- normalize a
+    body <- normalize (f (Ref $ VRef local))
+    tellGlobal @RecLang var (Bind head local (Return $ Ref body))
   pure var
   where
-     go :: [Expr] -> [(Var, Typed Var)] -> RecLang -> m (Lang' Var)
-     go guards acc (Bound (Guard g) e) = do
-        g' <- traverse normalize g
-        go (g':guards) acc (e Unit)
-     go guards acc (Bound body fun) = do
-        varId <- stableName fun
-        bodyId <- normalize body
-        let var = Var varId "l"
-        go guards ((var,Typed bodyId AnyType):acc) (fun (Ref $ Typed (VRef var) AnyType))
-     -- bit ugly, and should be handled by the inliner later anyway
-     -- go guards acc (RecLang (Return (Ref (Typed (VRef v) t)))) = pure $ Comprehend (reverse acc) [] guards [] t (Ref (Typed v t))
-     go guards acc (RecLang (OpLang o)) = do
-         go guards acc (Bound (RecLang $ OpLang o) (RecLang . Return))
-     go guards acc (RecLang i) =
-         traverse normalize i >>= \case
-           Return o -> pure $ Comprehend (reverse acc) [] guards [] AnyType o
-           c@Comprehend {} -> pure $ c { cBound = reverse acc <> cBound c, cPred = guards <> cPred c }
-           OpLang _ -> error "Impossible"
-     go guards acc (VRef v) = go guards acc (Bound (VRef v) (RecLang . Return))
-       -- l <- freshName
-       -- let loc = Var l "v"
-       -- pure $ Comprehend (reverse $ (loc,Typed v AnyType):acc) [] guards [] AnyType (Ref $ Typed loc AnyType)
-     go guards acc (Guard g) = go guards acc (Bound (Guard g) (\_ -> RecLang $ Return Unit))
+     -- go :: RecLang -> m (Lang' Var)
+     -- go (Bound (Bound a b) e) = go $ Bound a (\a' -> Bound (b a') e)
+     -- go (Bound (Guard g) e) = do
+     --    g <- traverse normalize g
+     --    Filter g <$> go (e Unit)
+     -- go (Bound m e) = do
+     --   ms <- normalize m
+     --   v <- freshName
+     --   let var = Var v "l"
+     --   Bind ms var <$> go (e (Ref (VRef var)))
+     -- go (Guard g) = go (Bound (Guard g) (\_ -> RecLang $ Return Unit))
+     -- go (RecLang (Return a)) = do
+     --     Return <$> traverse normalize a
+     -- go a = do
+     --   var <- normalize a
+     --   pure $ Return (Ref var)
+--      go guards acc (Bound (Guard g) e) = do
+--         g' <- traverse normalize g
+--         go (g':guards) acc (e Unit)
+--      go guards acc (Bound body fun) = do
+--         varId <- stableName fun
+--         bodyId <- normalize body
+--         let var = Var varId "l"
+--         go guards ((var,Typed bodyId AnyType):acc) (fun (Ref $ Typed (VRef var) AnyType))
+--      -- bit ugly, and should be handled by the inliner later anyway
+--      -- go guards acc (RecLang (Return (Ref (Typed (VRef v) t)))) = pure $ Comprehend (reverse acc) [] guards [] t (Ref (Typed v t))
+--      go guards acc (RecLang (OpLang o)) = do
+--          go guards acc (Bound (RecLang $ OpLang o) (RecLang . Return))
+--      go guards acc (RecLang i) =
+--          traverse normalize i >>= \case
+--            Return o -> pure $ Comprehend (reverse acc) [] guards [] AnyType o
+--            c@Comprehend {} -> pure $ c { cBound = reverse acc <> cBound c, cPred = guards <> cPred c }
+--            OpLang _ -> error "Impossible"
+--      go guards acc (VRef v) = go guards acc (Bound (VRef v) (RecLang . Return))
+--        -- l <- freshName
+--        -- let loc = Var l "v"
+--        -- pure $ Comprehend (reverse $ (loc,Typed v AnyType):acc) [] guards [] AnyType (Ref $ Typed loc AnyType)
+--      go guards acc (Guard g) = go guards acc (Bound (Guard g) (\_ -> RecLang $ Return Unit))
     -- v <- normalize e
     -- normalize (f (Ref (Typed v AnyType)))
-normalize (Guard _) = error "standalone guard not implemented yet"
+normalize l@(Guard g) = do
+  key <- stableName w
+  let var = Var key "v"
+  doOnce key ((\x -> tellGlobal @RecLang var . Filter x Unit) =<< traverse normalize l)
+   pure var
 instance (MonadRef m, MonadGlobals RecLang m) => MuRef RecLang m where
     type DeRef RecLang = Lang' Var
     type Key RecLang = Var
@@ -323,14 +347,14 @@ type TopLevel = TopLevel' (Lang' Var)
 data TypeEnv = TE { tableTys :: LM.Map Var ExprType, funTys :: LM.Map Fun ExprType }
   deriving (Eq, Ord, Show, Data)
 type ScopeEnv = M.Map Var ExprType
-etyOf :: Expr' e -> ExprType
-etyOf = \case
-  Ref var -> tyType var
-  Proj ety _ _ -> ety
-  BOp ety _ _ _ -> ety
-  _ -> error "todo"
-ltyOf :: Lang' a -> ExprType
-ltyOf = \case
-  Comprehend _ _ _ _ ety _ -> ety
-  Return e -> etyOf e
-  _ -> error "todo"
+-- etyOf :: Expr' e -> ExprType
+-- etyOf = \case
+--   Ref var -> var
+--   Proj ety _ _ -> ety
+--   BOp ety _ _ _ -> ety
+--   _ -> error "todo"
+-- ltyOf :: Lang' a -> ExprType
+-- ltyOf = \case
+--   -- Comprehend _ _ _ _ ety _ -> ety
+--   Return e -> etyOf e
+--   _ -> error "todo"

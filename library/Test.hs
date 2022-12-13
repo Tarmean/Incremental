@@ -40,4 +40,4 @@ testRightNest = M.do
        -- M.guards (Eql f a)
    M.pure (Tuple [a, b])
 
-nest x = Ref (Typed x AnyType)
+nest x = Ref x

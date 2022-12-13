@@ -20,68 +20,65 @@ import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
 import Data.Semigroup (Max(..))
 
-recompExprType :: TypeEnv -> ScopeEnv -> Expr -> ExprType
-recompExprType env scope (Ref v) = fromMaybe AnyType (scope LM.!? tyData v <|> tableTys env LM.!? tyData v)
-recompExprType _env _scope (Proj _ i v) = case etyOf v of
-  TupleTyp ls -> ls !! i
-  _ -> error "Projection of non-tuple"
-recompExprType _env _scope (BOp _ op _ _) = case op of
-    Eql -> EBase $ typeRep (Proxy :: Proxy Bool)
-recompExprType _ _ _ = AnyType
+-- recompExprType :: TypeEnv -> ScopeEnv -> Expr -> ExprType
+-- recompExprType env scope (Ref v) = fromMaybe AnyType (scope LM.!? tyData v <|> tableTys env LM.!? tyData v)
+-- recompExprType _env _scope (Proj _ i v) = case etyOf v of
+--   TupleTyp ls -> ls !! i
+--   _ -> error "Projection of non-tuple"
+-- recompExprType _env _scope (BOp _ op _ _) = case op of
+--     Eql -> EBase $ typeRep (Proxy :: Proxy Bool)
+-- recompExprType _ _ _ = AnyType
 
-recompLangType :: Lang' a -> ExprType
-recompLangType = \case
-  Comprehend _ _ _ _ _ e -> etyOf e
-  Return e -> etyOf e
-  _ -> AnyType
+-- recompLangType :: Lang' a -> ExprType
+-- recompLangType = \case
+--   Comprehend _ _ _ _ _ e -> etyOf e
+--   Return e -> etyOf e
+--   _ -> AnyType
 
-recompTypes :: TopLevel -> TopLevel
-recompTypes e0 =  outLevel
-  where
-     outLevel = runReader (runT t e0) LM.empty
-     out = TE (LM.fromList [ (unSource k, ltyOf v) | (k,(_args, v)) <- LM.toList (defs e0) ]) mempty
-     t =
-         trans (\rec -> \case
-           (w@Comprehend {cBound}::Lang) -> recompLang <$> local (M.union $ boundEnv cBound) (rec w)
-           w -> recompLang <$> rec w)
-        |||
-         trans (\rec a ->
-           recompExpr =<< rec a)
-        |||
-         recurse
-     boundEnv :: [(Var, Typed Var)] -> M.Map Var ExprType
-     boundEnv = M.fromList . map (second tyType)
-     recompLang e = setLangType e $ recompLangType e
-     recompExpr e = do
-        scope <- ask
-        pure $ setExprType e (recompExprType out scope e)
+-- recompTypes :: TopLevel -> TopLevel
+-- recompTypes e0 =  outLevel
+--   where
+--      outLevel = runReader (runT t e0) LM.empty
+--      out = TE (LM.fromList [ (unSource k, ltyOf v) | (k,(_args, v)) <- LM.toList (defs e0) ]) mempty
+--      t =
+--          trans (\rec -> \case
+--            (w@Comprehend {cBound}::Lang) -> recompLang <$> local (M.union $ boundEnv cBound) (rec w)
+--            w -> recompLang <$> rec w)
+--         |||
+--          trans (\rec a ->
+--            recompExpr =<< rec a)
+--         |||
+--          recurse
+--      boundEnv :: [(Var, Typed Var)] -> M.Map Var ExprType
+--      boundEnv = M.fromList . map (second tyType)
+--      recompLang e = setLangType e $ recompLangType e
+--      recompExpr e = do
+--         scope <- ask
+--         pure $ setExprType e (recompExprType out scope e)
 
 instance FreeVars Lang where
    freeVars = freeVarsQ
-setLangType :: Lang' a -> ExprType -> Lang' a
-setLangType l t = case l of
-  Comprehend {} -> l { eTyp = t }
-  Return e -> Return e
+-- setLangType :: Lang' a -> ExprType -> Lang' a
+-- setLangType l t = case l of
+--   Comprehend {} -> l { eTyp = t }
+--   Return e -> Return e
 
-setExprType :: Expr -> ExprType -> Expr
-setExprType expr t = case expr of
-  Ref v -> Ref v { tyType = t }
-  Proj _ i e -> Proj t i e
-  BOp _ op a b -> BOp t op a b
+-- setExprType :: Expr -> ExprType -> Expr
+-- setExprType expr t = case expr of
+--   Ref v -> Ref v { tyType = t }
+--   Proj _ i e -> Proj t i e
+--   BOp _ op a b -> BOp t op a b
 
 
-freeVarsQ :: Data a => a -> S.Set (Typed Var)
+freeVarsQ :: Data a => a -> S.Set Var
 freeVarsQ = runQ $
      query (\rec -> \case
        Ref @Var v -> S.singleton v
        a -> rec a)
  ||| query (\rec -> \case
-       (w@Comprehend {cBound} :: Lang) -> rec w S.\\ boundVars cBound
+       (w@Bind {} :: Lang) -> S.delete (boundVar w) (rec w)
        a -> rec (a::Lang))
  ||| recurse
- where
-   boundVars :: [(Var, Typed Var)] -> S.Set Local
-   boundVars binder = S.fromList [ Typed var (tyType body) | (var,body) <- binder ]
 
 nullTypes :: Data a => a -> a
 nullTypes = runIdentity .: runT $
@@ -114,7 +111,7 @@ type LiftFuns m = StateT (M.Map Fun ([Local], Lang)) (VarGenT m)
 maxVar :: Data a => a -> Int
 maxVar = getMax . runQ (
      query (\rec -> \case
-       Ref @Var v -> Max (uniq (tyData v))
+       Ref @Var v -> Max (uniq v)
        a -> rec a)
  ||| recurse)
 
@@ -122,7 +119,7 @@ withVarGenT :: Monad m => Int -> VarGenT m a -> m a
 withVarGenT i = flip evalStateT i . runVarGenT
 
 nestedToThunks :: TopLevel -> TopLevel
-nestedToThunks tl = runIdentity $ runT (trans_ collectionArgToFun ||| recurse) tl
+nestedToThunks tl = dropTopLevel $ runIdentity $ runT (trans_ collectionArgToFun ||| recurse) tl
   where
     argsOf :: Var -> [Local]
     argsOf v = case LM.lookup (Source v) (defs tl) of
@@ -131,6 +128,10 @@ nestedToThunks tl = runIdentity $ runT (trans_ collectionArgToFun ||| recurse) t
     collectionArgToFun :: SomeArg -> Identity SomeArg
     collectionArgToFun (CollArg l) = pure (ThunkArg (Source l) AnyType (fmap Ref (argsOf l)))
     collectionArgToFun other = pure other
+dropTopLevel :: TopLevel' p -> TopLevel' p
+dropTopLevel a = a { defs = M.map dropDefs (defs a) }
+  where
+    dropDefs (l,r) = (filter ((`M.notMember` defs a) . Source) l, r)
 
     -- aggrToFun :: Monad m => Expr -> LiftFuns m Expr
     -- aggrToFun (Aggr op r)

@@ -14,7 +14,6 @@ import Control.Monad.Identity (Identity(Identity))
 import Data.Coerce (coerce)
 import qualified Data.Set as S
 import Test (testFlat)
-import Rewrites (freeVarsQ)
 import Data.Bifunctor (second)
 
 
@@ -91,12 +90,12 @@ type Usages = M.Map Var Usage
 analyzeArity :: Data a => a -> MonoidMap Var Usage
 analyzeArity = runQ $
   query (\rec -> \case
-    Ref @Var v -> MonoidMap (M.singleton (tyData v) Once)
+    Ref @Var v -> MonoidMap (M.singleton v Once)
     a -> rec a)
  &&&
   query (\rec -> \case
-    (Comprehend {..}::Lang' Var) -> 
-      MonoidMap (M.fromListWith (<>) [ (tyData v, Once) | (_,v) <- cBound ])
+    (Bind a b c ::Lang' Var) -> 
+      MonoidMap (M.singleton a Once) <> rec c
     a -> rec a )
  &&&
   query (\rec' (TopLevel {..}::TopLevel) ->
@@ -113,17 +112,11 @@ m !!! k = case M.lookup k m of
   Nothing -> error $ "Key not found: " ++ show k ++ ", in map: " ++ show m
   Just o -> o
 
-tester :: IO ()
-tester = do
-  let tl = toTopLevel testFlat
-  let !mults  = analyzeArity tl
-  pprint $ M.toList $ gatherInlines mults tl
-
 
 simpleBind :: Lang' Var -> Bool
 simpleBind (Return _) = True
-simpleBind (Comprehend [(a,_)] [] [] [] _ (Ref c))
-  | tyData c == a = True
+simpleBind (Bind _ b (Return c))
+  | Ref b == c = True
 simpleBind _ = False
 
 simpleBinds :: TopLevel -> [Source]
@@ -147,41 +140,42 @@ localsFor binds v
   where out = [localN | (localN,globalN) <- binds, tyData globalN == v]
 
 inlineComp :: Lang -> Var -> Lang -> Lang
-inlineComp (Comprehend {..}) v (Return r)
-  = Comprehend { cLet = cLet ++ newLet, .. }
-  where
-    locals = localsFor cBound v
-    newLet
-     = if null locals 
-       then [(v,r)]
-       else [(v',r) | v' <- locals]
-inlineComp l@Comprehend{} var r@Comprehend{} = Comprehend {
-    cBound = cBound l <> cBound r,
-    cPred = cPred l <> cPred r,
-    cPred2 = cPred2 l <> cPred2 r,
-    eTyp = mergeTyp (eTyp l) (mergeTyp r),
-    cLet = cLet l <> cLet r <> [(var', cOut r) | var' <- notNull $ localsFor (cBound l) var],
-    cOut = cOut l
-  }
-  where
-    notNull [] = error "localsFor returned empty list"
-    notNull xs = xs
-inlineComp _ _ _ = error "Illegal merge"
+inlineComp a _ _ = a
+-- inlineComp (Comprehend {..}) v (Return r)
+--   = Comprehend { cLet = cLet ++ newLet, .. }
+--   where
+--     locals = localsFor cBound v
+--     newLet
+--      = if null locals 
+--        then [(v,r)]
+--        else [(v',r) | v' <- locals]
+-- inlineComp l@Comprehend{} var r@Comprehend{} = Comprehend {
+--     cBound = cBound l <> cBound r,
+--     cPred = cPred l <> cPred r,
+--     cPred2 = cPred2 l <> cPred2 r,
+--     eTyp = mergeTyp (eTyp l) (mergeTyp r),
+--     cLet = cLet l <> cLet r <> [(var', cOut r) | var' <- notNull $ localsFor (cBound l) var],
+--     cOut = cOut l
+--   }
+--   where
+--     notNull [] = error "localsFor returned empty list"
+--     notNull xs = xs
+-- inlineComp _ _ _ = error "Illegal merge"
 
 mergeTyp :: p1 -> p2 -> p1
 mergeTyp a _ = a
 
 
 inlineLang :: M.Map Var Lang -> Lang -> Lang
-inlineLang binds c@Comprehend {} = out
-  where
-    out = case inlined of
-      Comprehend {..} -> Comprehend { cBound = dropIrrelevant cBound, ..}
-      _ -> error "impossible"
-    dropIrrelevant = filter ((`M.notMember` relevant) . tyData . snd)
-    frees = S.map tyData (freeVarsQ c)
-    relevant = M.filterWithKey (\k _ -> k `S.member` frees)  binds
-    inlined = foldl' (uncurry . inlineComp) c (M.toList relevant)
+-- inlineLang binds c@Comprehend {} = out
+--   where
+--     out = case inlined of
+--       -- Comprehend {..} -> Comprehend { cBound = dropIrrelevant cBound, ..}
+--       _ -> error "impossible"
+--     dropIrrelevant = filter ((`M.notMember` relevant) . tyData . snd)
+--     frees = S.map tyData (freeVarsQ c)
+--     relevant = M.filterWithKey (\k _ -> k `S.member` frees)  binds
+--     inlined = foldl' (uncurry . inlineComp) c (M.toList relevant)
 inlineLang _ a = a
 
 doInlines :: MonoidMap Var Usage -> TopLevel -> TopLevel
@@ -198,9 +192,9 @@ gatherInlines arities tl = inlines
     simples = unSource <$> simpleBinds tl
 
 inlinable :: Lang' Var -> Bool
-inlinable (Comprehend {}) = True
-inlinable (Return {}) = True
-inlinable _ = False
+-- inlinable (Comprehend {}) = True
+-- inlinable (Return {}) = True
+inlinable _ = True
 
 
 optPass :: TopLevel -> TopLevel
