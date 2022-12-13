@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds #-}
 module MonadSyntax where
 
 
@@ -6,12 +7,12 @@ import CompileQuery
 
 import Prelude hiding (pure, return, (>>=), (>>))
 
-pure :: Expr' RecLang -> RecLang
+pure :: Expr' 'Rec -> RecLang
 pure = return
-return :: Expr' RecLang -> RecLang
-return = RecLang . Return
-(>>=) :: RecLang -> (Expr' RecLang -> RecLang) -> RecLang
-(>>=)  = Bound
+return :: Expr' 'Rec -> RecLang
+return = Return
+(>>=) :: RecLang -> (Expr' 'Rec -> RecLang) -> RecLang
+(>>=)  = FBind
 (>>) :: RecLang -> RecLang -> RecLang
 (>>) a b = a >>= const b
 

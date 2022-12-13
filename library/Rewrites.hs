@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DerivingVia #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
+{-# LANGUAGE DataKinds #-}
 module Rewrites where
 
 import CompileQuery
@@ -13,11 +14,7 @@ import qualified Data.Set as S
 import qualified Data.Map.Lazy as LM
 import qualified Data.Map.Strict as M
 import OpenRec
-import Control.Monad.Reader (local, MonadReader (..), runReader)
-import Data.Bifunctor (Bifunctor(..))
 import Data.Functor.Identity
-import Data.Maybe (fromMaybe)
-import Control.Applicative ((<|>))
 import Data.Semigroup (Max(..))
 
 -- recompExprType :: TypeEnv -> ScopeEnv -> Expr -> ExprType
@@ -73,7 +70,7 @@ instance FreeVars Lang where
 freeVarsQ :: Data a => a -> S.Set Var
 freeVarsQ = runQ $
      query (\rec -> \case
-       Ref @Var v -> S.singleton v
+       LRef @'Flat v -> S.singleton v
        a -> rec a)
  ||| query (\rec -> \case
        (w@Bind {} :: Lang) -> S.delete (boundVar w) (rec w)
@@ -83,8 +80,6 @@ freeVarsQ = runQ $
 nullTypes :: Data a => a -> a
 nullTypes = runIdentity .: runT $
    trans_ (\(_ :: ExprType) -> pure (error "Nulled Type")) ||| recurse
-(.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
-(.:) = (.).(.)
 
 
 newtype VarGenT m a = VarGenT { runVarGenT :: StateT Int m a }
@@ -104,14 +99,12 @@ instance (MonadTrans t, Monad (t m), MonadVar m) => MonadVar (Elevator t m) wher
 
 -- calcArity :: 
 
-overBody :: Functor m => (Expr -> m Expr) -> Out -> m Out
-overBody f a = Out (target a) <$> f (expr a)
 
 type LiftFuns m = StateT (M.Map Fun ([Local], Lang)) (VarGenT m)
 maxVar :: Data a => a -> Int
 maxVar = getMax . runQ (
      query (\rec -> \case
-       Ref @Var v -> Max (uniq v)
+       LRef @'Flat v -> Max (uniq v)
        a -> rec a)
  ||| recurse)
 
@@ -119,14 +112,17 @@ withVarGenT :: Monad m => Int -> VarGenT m a -> m a
 withVarGenT i = flip evalStateT i . runVarGenT
 
 nestedToThunks :: TopLevel -> TopLevel
-nestedToThunks tl = dropTopLevel $ runIdentity $ runT (trans_ collectionArgToFun ||| recurse) tl
+nestedToThunks tl = dropTopLevel $ runIdentity $ runT (trans_ nestToThunk &&& (trans_ collectionArgToFun ||| recurse)) tl
   where
+    nestToThunk :: Expr -> Identity Expr
+    nestToThunk (Nest (LRef r)) = pure $ AThunk (Thunk (Source r) [])
+    nestToThunk a = pure a
     argsOf :: Var -> [Local]
     argsOf v = case LM.lookup (Source v) (defs tl) of
       Just (args, _) -> args
       Nothing -> error "Undefined function"
     collectionArgToFun :: SomeArg -> Identity SomeArg
-    collectionArgToFun (CollArg l) = pure (ThunkArg (Source l) AnyType (fmap Ref (argsOf l)))
+    collectionArgToFun (ThunkArg (Source l) t []) = pure (ThunkArg (Source l) t (fmap Ref (argsOf l)))
     collectionArgToFun other = pure other
 dropTopLevel :: TopLevel' p -> TopLevel' p
 dropTopLevel a = a { defs = M.map dropDefs (defs a) }

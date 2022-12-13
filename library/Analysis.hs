@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DataKinds #-}
 module Analysis where
 
 
@@ -15,6 +16,8 @@ import Data.Coerce (coerce)
 import qualified Data.Set as S
 import Test (testFlat)
 import Data.Bifunctor (second)
+import Data.Functor.Identity (Identity(runIdentity))
+import Debug.Trace (trace)
 
 
 newtype MonoidMap k v = MonoidMap { unMonoidMap :: M.Map k v }
@@ -90,14 +93,13 @@ type Usages = M.Map Var Usage
 analyzeArity :: Data a => a -> MonoidMap Var Usage
 analyzeArity = runQ $
   query (\rec -> \case
-    Ref @Var v -> MonoidMap (M.singleton v Once)
+    (Ref  v::Expr) -> MonoidMap (M.singleton v Once)
     a -> rec a)
- &&&
+ |||
   query (\rec -> \case
-    (Bind a b c ::Lang' Var) -> 
-      MonoidMap (M.singleton a Once) <> rec c
+    (LRef v::Lang) -> MonoidMap (M.singleton v Once)
     a -> rec a )
- &&&
+ |||
   query (\rec' (TopLevel {..}::TopLevel) ->
       let
         rec :: Data a => a -> MonoidMap Var Usage
@@ -105,7 +107,7 @@ analyzeArity = runQ $
         defUsage = M.mapKeys unSource (M.map rec defs)
         recs = fixTransitive @_ @Usage $ coerce defUsage
       in MonoidMap (recs M.! unSource root))
- &&& recurse
+ ||| recurse
 
 (!!!) :: (HasCallStack, Ord k, Show k, Show a) => M.Map k a -> k -> a
 m !!! k = case M.lookup k m of
@@ -113,7 +115,7 @@ m !!! k = case M.lookup k m of
   Just o -> o
 
 
-simpleBind :: Lang' Var -> Bool
+simpleBind :: Lang -> Bool
 simpleBind (Return _) = True
 simpleBind (Bind _ b (Return c))
   | Ref b == c = True
@@ -167,31 +169,30 @@ mergeTyp a _ = a
 
 
 inlineLang :: M.Map Var Lang -> Lang -> Lang
--- inlineLang binds c@Comprehend {} = out
---   where
---     out = case inlined of
---       -- Comprehend {..} -> Comprehend { cBound = dropIrrelevant cBound, ..}
---       _ -> error "impossible"
---     dropIrrelevant = filter ((`M.notMember` relevant) . tyData . snd)
---     frees = S.map tyData (freeVarsQ c)
---     relevant = M.filterWithKey (\k _ -> k `S.member` frees)  binds
---     inlined = foldl' (uncurry . inlineComp) c (M.toList relevant)
-inlineLang _ a = a
+inlineLang m = runIdentity .: runT $
+  trans @Lang (\rec -> \case
+    LRef v
+      | Just o <- m M.!? v -> pure o
+    a -> rec (a::Lang))
+  ||| recurse
+
 
 doInlines :: MonoidMap Var Usage -> TopLevel -> TopLevel
 doInlines arities tl = tl {
-    defs = M.filterWithKey (\k _ -> unSource k `M.notMember` inlines) $ M.map (second (inlineLang inlines)) (defs tl)
+    defs = M.difference defs' (M.mapKeysMonotonic Source inlines)
     -- funs = M.map (inlineLang inlines) (funs tl)
  }
-  where inlines = gatherInlines arities tl
-gatherInlines :: MonoidMap Var Usage -> TopLevel -> M.Map Var Lang
-gatherInlines arities tl = inlines
+  where
+    inlines = gatherInlines arities tl defs'
+    defs' = M.map (second (inlineLang inlines)) (defs tl)
+gatherInlines :: MonoidMap Var Usage -> TopLevel -> M.Map Source ([Local], Lang) -> M.Map Var Lang
+gatherInlines arities tl defs' = inlines
   where
     toInline = simples <> withArity Once arities
-    inlines = M.fromList [ (v, def) | v <- toInline, Just (_args, def) <- [defs tl M.!? Source v], inlinable def]
+    inlines = M.fromList [ (v, def) | v <- toInline, Just (_args, def) <- [defs' M.!? Source v], inlinable def]
     simples = unSource <$> simpleBinds tl
 
-inlinable :: Lang' Var -> Bool
+inlinable :: Lang -> Bool
 -- inlinable (Comprehend {}) = True
 -- inlinable (Return {}) = True
 inlinable _ = True

@@ -1,11 +1,12 @@
 {-# LANGUAGE QualifiedDo #-}
+{-# LANGUAGE DataKinds #-}
 module Test where
 import qualified MonadSyntax as M
 import CompileQuery
 
 
 table :: String -> RecLang
-table s = RecLang (OpLang (Opaque s))
+table s = OpLang (Opaque s)
 
 testQ :: RecLang
 testQ = M.do
@@ -33,11 +34,13 @@ testRightNest :: RecLang
 testRightNest = M.do
    a <- table "user"
    let
-    b = Aggr SumT $ CollArg $ M.do
+    b = AggrNested SumT $ M.do
        f <- table "foo"
-       Guard (a .== f)
+       guards (a .== f)
        M.pure f
        -- M.guards (Eql f a)
    M.pure (Tuple [a, b])
+guards :: Expr' 'Rec -> RecLang
+guards e = Filter e (Return Unit)
 
-nest x = Ref x
+nest = Nest

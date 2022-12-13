@@ -7,6 +7,9 @@ import Data.Data hiding (gmapM)
 import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter)
 -- import Control.Monad.Writer.Strict (WriterT, runWriterT, tell)
 
+(.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
+(.:) = (.).(.)
+
 -- fixme, add
 type Trans1 m = forall x. Data x => x -> m x
 data Ctx m = Ctx {
