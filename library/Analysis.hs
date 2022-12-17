@@ -1,5 +1,4 @@
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DataKinds #-}
 module Analysis where
 
@@ -11,13 +10,10 @@ import Data.Foldable (Foldable(foldl'))
 import Data.Data (Data)
 import GHC.Stack (HasCallStack)
 import Prettyprinter (Pretty (pretty), align)
-import Control.Monad.Identity (Identity(Identity))
 import Data.Coerce (coerce)
 import qualified Data.Set as S
-import Test (testFlat)
 import Data.Bifunctor (second)
 import Data.Functor.Identity (Identity(runIdentity))
-import Debug.Trace (trace)
 
 
 newtype MonoidMap k v = MonoidMap { unMonoidMap :: M.Map k v }
@@ -90,24 +86,26 @@ type Usages = M.Map Var Usage
 (<&>) = M.unionWith (<>)
 
 
-analyzeArity :: Data a => a -> MonoidMap Var Usage
-analyzeArity = runQ $
-  query (\rec -> \case
-    (Ref  v::Expr) -> MonoidMap (M.singleton v Once)
-    a -> rec a)
- |||
-  query (\rec -> \case
-    (LRef v::Lang) -> MonoidMap (M.singleton v Once)
-    a -> rec a )
- |||
-  query (\rec' (TopLevel {..}::TopLevel) ->
-      let
-        rec :: Data a => a -> MonoidMap Var Usage
-        rec = rec' . Identity
-        defUsage = M.mapKeys unSource (M.map rec defs)
-        recs = fixTransitive @_ @Usage $ coerce defUsage
-      in MonoidMap (recs M.! unSource root))
- ||| recurse
+analyzeArity :: TopLevel -> MonoidMap Var Usage
+analyzeArity tl=  MonoidMap (recs M.! unSource (root tl))
+  where
+    defUsage = M.mapKeys unSource (M.map theQ (defs tl))
+    recs = fixTransitive @_ @Usage $ coerce defUsage
+    theQ = runQ $
+      query (\rec -> \case
+        (Ref  v::Expr) -> MonoidMap (M.singleton v Once)
+        a -> rec a)
+     |||
+      query (\rec -> \case
+        (LRef v::Lang) -> MonoidMap (M.singleton v Once)
+        a -> rec a )
+     ||| recurse
+avoidInline :: Data a => a -> S.Set Var
+avoidInline = runQ $ 
+   tryQuery (\_rec -> \case
+       (Return a::Lang) -> Just (freeVarsQ a)
+       _ -> Nothing)
+   ||| recurse
 
 (!!!) :: (HasCallStack, Ord k, Show k, Show a) => M.Map k a -> k -> a
 m !!! k = case M.lookup k m of
@@ -121,8 +119,9 @@ simpleBind (Bind _ b (Return c))
   | Ref b == c = True
 simpleBind _ = False
 
-simpleBinds :: TopLevel -> [Source]
-simpleBinds (TopLevel {..}) = map fst . filter (simpleBind . snd . snd) $ M.toList defs
+-- simpleBinds :: TopLevel -> [Source]
+simpleBinds :: M.Map b (a, Lang) -> [b]
+simpleBinds def = map fst . filter (simpleBind . snd . snd) $ M.toList def
 
 withArity :: Usage -> MonoidMap Var Usage -> [Var]
 withArity us (MonoidMap m) = map fst . filter ((==us) . snd) $ M.toList m
@@ -179,18 +178,19 @@ inlineLang m = runIdentity .: runT $
 
 doInlines :: MonoidMap Var Usage -> TopLevel -> TopLevel
 doInlines arities tl = tl {
-    defs = M.difference defs' (M.mapKeysMonotonic Source inlines)
+    defs = M.filterWithKey (\k _ -> unSource k `M.notMember` inlines) defs'
     -- funs = M.map (inlineLang inlines) (funs tl)
  }
   where
-    inlines = gatherInlines arities tl defs'
     defs' = M.map (second (inlineLang inlines)) (defs tl)
-gatherInlines :: MonoidMap Var Usage -> TopLevel -> M.Map Source ([Local], Lang) -> M.Map Var Lang
-gatherInlines arities tl defs' = inlines
+    inlines = gatherInlines tl arities defs'
+gatherInlines :: TopLevel -> MonoidMap Var Usage -> M.Map Source ([Var], Lang) -> M.Map Var Lang
+gatherInlines tl arities theDefs = inlines
   where
     toInline = simples <> withArity Once arities
-    inlines = M.fromList [ (v, def) | v <- toInline, Just (_args, def) <- [defs' M.!? Source v], inlinable def]
-    simples = unSource <$> simpleBinds tl
+    avoids = avoidInline (defs tl)
+    inlines = M.fromList [ (v, def) | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v]]
+    simples = unSource <$> simpleBinds (defs tl)
 
 inlinable :: Lang -> Bool
 -- inlinable (Comprehend {}) = True

@@ -7,6 +7,7 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE LambdaCase #-}
 module CompileQuery where
 import qualified Data.Set as S
 import qualified Data.Map.Strict as M
@@ -17,6 +18,8 @@ import Data.Reify
 import GHC.IO (unsafePerformIO)
 import Prettyprinter
 import Prettyprinter.Render.String (renderString)
+import GHC.Stack.Types (HasCallStack)
+import OpenRec
 
 
 -- let v_1 = for l_2 in v_3
@@ -77,7 +80,7 @@ import Prettyprinter.Render.String (renderString)
 -- Could use the GHC rapier for capture avoiding substitutions?
 
 class TraverseP f where
-   traverseP :: Applicative m => (Lang' p -> m (Lang' q)) -> f p -> m (f q)
+   traverseP :: (HasCallStack, Applicative m) => (Lang' p -> m (Lang' q)) -> f p -> m (f q)
 data SomeArg' p = ValArg (Expr' p) | ThunkArg Source ExprType [Expr' p]
 deriving instance Eq SomeArg 
 deriving instance Ord SomeArg 
@@ -95,12 +98,14 @@ type SomeArg = SomeArg' 'Flat
 --   deriving (Eq, Ord, Show, Data)
 data Typed a = Typed { tyData :: a, tyType :: ExprType }
   deriving (Eq, Ord, Show, Data, Functor, Foldable, Traversable)
-data Thunk = Thunk { atSource :: Source, atArgs :: [SomeArg] }
+data Thunk = Thunk { atSource :: Source, atArgs :: [Var] }
   deriving (Eq, Ord, Show, Data)
 instance Pretty Thunk where
     pretty (Thunk s as) = pretty s <> tupled (map pretty as)
 --   ThunkNest :: { atSource :: Source, atArgs :: [SomeArg] } -> Thunked Nest
 --   deriving (Eq, Ord, Show, Data)
+
+-- FIXME: Ref and LRef are sort of interchangeable while higher order relations exist.
 data Expr' (p::Phase) where
     Ref :: Var -> Expr' p
     AThunk :: Thunk -> Expr' p
@@ -108,55 +113,15 @@ data Expr' (p::Phase) where
     BOp :: ExprType -> BOp -> (SomeArg' p) -> (SomeArg' p) -> Expr' p
     Unit :: Expr' p
     Tuple :: [Expr' p] -> Expr' p
-    Aggr :: AggrOp -> Thunk -> Expr' 'Flat
+    Aggr :: AggrOp -> Thunk -> Expr' p
     AggrNested :: AggrOp -> (Lang' p) -> Expr' p
     Nest :: Lang' a -> Expr' a
+    Pack :: {  packLabels :: [Var] } ->  Expr' p
 deriving instance Eq Expr
 deriving instance Ord Expr
 deriving instance Show Expr
-instance Data Expr where
-   gfoldl f z (Ref v) = z Ref `f` v
-   gfoldl f z (AThunk t) = z AThunk `f` t
-   gfoldl f z (Proj t i e) = z (Proj t i) `f` e
-   gfoldl f z (BOp t op a b) = z (BOp t op) `f` a `f` b
-   gfoldl f z Unit = z Unit
-   gfoldl f z (Tuple es) = z Tuple `f` es
-   gfoldl f z (Aggr op t) = z (Aggr op) `f` t
-   gfoldl f z (AggrNested op e) = z (AggrNested op) `f` e
-   gfoldl f z (Nest e) = z Nest `f` e
+deriving instance Data Expr
 
-   gunfold k z c = case constrIndex c of
-      1 -> k (z Ref)
-      2 -> k (z AThunk)
-      3 -> k (k (k (z Proj)))
-      4 -> k (k (k (k (z BOp))))
-      5 -> z Unit
-      6 -> k (z Tuple)
-      7 -> k (k (z Aggr))
-      _ -> error "gunfold"
-   toConstr (Ref {}) = refConstr
-   toConstr (AThunk  {}) = aThunkConstr
-   toConstr (Proj {}) = projConstr
-   toConstr (BOp {}) = bOpConstr
-   toConstr Unit = unitConstr
-   toConstr (Tuple {}) = tupleConstr
-   toConstr (Aggr {}) = aggrConstr
-   toConstr (AggrNested {}) = aggrNestedConstr
-
-   dataTypeOf _ = exprDataType
-
-aggrNestedConstr :: Constr
-aggrNestedConstr = mkConstr exprDataType "AggrNested" [] Prefix
-refConstr, aThunkConstr, projConstr, bOpConstr, unitConstr, tupleConstr, aggrConstr :: Constr
-refConstr = mkConstr exprDataType "Ref" [] Prefix
-aThunkConstr = mkConstr exprDataType "AThunk" [] Prefix
-projConstr = mkConstr exprDataType "Proj" [] Prefix
-bOpConstr = mkConstr exprDataType "BOp" [] Prefix
-unitConstr = mkConstr exprDataType "Unit" [] Prefix
-tupleConstr = mkConstr exprDataType "Tuple" [] Prefix
-aggrConstr = mkConstr exprDataType "Aggr" [] Prefix
-exprDataType :: DataType
-exprDataType = mkDataType "Expr" [refConstr, aThunkConstr, projConstr, bOpConstr, unitConstr, tupleConstr, aggrConstr]
 
 instance TraverseP Expr'  where
    traverseP _ (Ref a) = pure (Ref a)
@@ -165,9 +130,11 @@ instance TraverseP Expr'  where
    traverseP f (BOp t op a b) = BOp t op <$> traverseP f a <*> traverseP f b
    traverseP _ Unit = pure Unit
    traverseP f (Tuple es) = Tuple <$> traverse (traverseP f) es
-   traverseP f (AggrNested op a) = AggrNested op <$> traverseP f a
-   traverseP _ (Aggr o f) = error "aggr"
+   traverseP f (AggrNested op a) = AggrNested op <$> f a
+   traverseP _ (Aggr _ _) = error "aggr"
    traverseP f (Nest o) = Nest <$> f o
+   traverseP _ (Pack ls) = pure $ Pack ls
+   -- traverseP f (Unpack e ls b) = Unpack <$> traverseP f e <*> pure ls <*> traverseP f b
 (.==) :: Expr' p -> Expr' p -> Expr' p
 (.==) a  b = BOp AnyType Eql (ValArg a) (ValArg b)
 data AggrOp = SumT | MinT | MaxT
@@ -203,7 +170,7 @@ eAnyTypeConstr = mkConstr exprTypeDataType "AnyType" [] Prefix
 eTupleConstr = mkConstr exprTypeDataType "Tuple" [] Prefix
 thunkConstr = mkConstr exprTypeDataType "Thunk" [] Prefix
 exprTypeDataType :: DataType
-exprTypeDataType = mkDataType "ExprType" [eBaseConstr, tupleConstr, thunkConstr]
+exprTypeDataType = mkDataType "ExprType" [eBaseConstr, eTupleConstr, thunkConstr]
 
 newtype Uniq = Uniq Int
   deriving (Eq, Show, Ord, Data)
@@ -216,6 +183,7 @@ data Lang' (t::Phase) where
   Return :: (Expr' t) -> Lang' t
   OpLang :: OpLang' t -> Lang' t
   LRef :: Var -> Lang' t
+  AsyncBind :: [(Var, Maybe AggrOp, Thunk)] -> Lang' t -> Lang' t
   FBind :: Lang' 'Rec -> (Expr' 'Rec -> Lang' 'Rec) -> Lang' 'Rec
 deriving instance Eq Lang
 deriving instance Ord Lang
@@ -226,6 +194,7 @@ instance Data Lang where
     gfoldl k z (Return a) = z Return `k` a
     gfoldl k z (OpLang a) = z OpLang `k` a
     gfoldl k z (LRef a) = z LRef `k` a
+    gfoldl k z (AsyncBind ls a) = z AsyncBind `k` ls `k` a
     gunfold k z c
       = case constrIndex c of
         1 -> k (k (k (z Bind)))
@@ -233,23 +202,25 @@ instance Data Lang where
         3 -> k (z Return)
         4 -> k (z OpLang)
         5 -> k (z LRef)
-        -- 6 -> k (z FBind)
+        6 -> k (k (z AsyncBind))
         _ -> error "illegal constructor index"
     toConstr (Bind {}) = bindConstr
     toConstr (Filter {}) = filterConstr
     toConstr (Return {}) = returnConstr
     toConstr (OpLang {}) = opLangConstr
     toConstr (LRef {}) = lRefConstr
+    toConstr (AsyncBind {}) = asyncBindConstr
     dataTypeOf _ = langDataType
-bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, fBindConstr :: Constr
+bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, fBindConstr,asyncBindConstr :: Constr
 bindConstr = mkConstr langDataType "Bind" [] Prefix
 filterConstr = mkConstr langDataType "Filter" [] Prefix
 returnConstr = mkConstr langDataType "Return" [] Prefix
 opLangConstr = mkConstr langDataType "OpLang" [] Prefix
 lRefConstr = mkConstr langDataType "LRef" [] Prefix
 fBindConstr = mkConstr langDataType "FBind" [] Prefix
+asyncBindConstr = mkConstr langDataType "AsyncBind" [] Prefix
 langDataType :: DataType
-langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, fBindConstr]
+langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, fBindConstr, asyncBindConstr]
 
     
 instance TraverseP Lang' where
@@ -258,8 +229,13 @@ instance TraverseP Lang' where
     traverseP f (Return e) = Return <$> traverseP f e
     traverseP f (OpLang op) = OpLang <$> traverseP f op
     traverseP _ (LRef v) = pure (LRef v)
+    traverseP f (AsyncBind ls l) = AsyncBind ls <$> traverseP f l
     traverseP _ (FBind _ _) = undefined -- FBind <$> (traverseP f l) <*> (traverseP f . g)
-data OpLang' (t::Phase) = Opaque String | Union (Lang' t) (Lang' t)
+data OpLang' (t::Phase)
+  = Opaque String
+  | Union (Lang' t) (Lang' t)
+  | Unpack { unpack :: Lang' t, labels :: [Var], unpackBody :: Lang' t }
+  | Lookup { lookupTable :: Source, keys :: [Var], assigned :: Var, lookupBody :: Lang' t}
 type OpLang = OpLang' 'Flat
 deriving instance Eq OpLang
 deriving instance Ord OpLang
@@ -268,6 +244,8 @@ deriving instance Data OpLang
 instance TraverseP OpLang' where
     traverseP _ (Opaque s) = pure $ Opaque s
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
+    traverseP f (Unpack a b c) = Unpack <$> f a <*> pure b <*> f c
+    traverseP f (Lookup a b c d) = Lookup a b c <$> f d
 type Lang = Lang' 'Flat
 type RecLang = Lang' 'Rec
 newtype Source = Source { unSource :: Var}
@@ -314,10 +292,16 @@ instance Pretty Expr where
     pretty (Tuple es) = tupled (map pretty es)
     pretty (AThunk a) = pretty a
     pretty (Nest a) = "Nest" <+> pretty a
+    pretty (Pack a) = "Pack" <> tupled (map pretty a)
 instance Pretty Lang where
-    pretty (Bind a b c) = "for" <+> pretty b <+> "in" <+> pretty a <+> braces (pretty c)
+    pretty (Bind a b c) = group $ nest 2 $ "for" <+> pretty b <+> "in" <+> align (pretty a) <+> "{" <> nest 2 (line <> pretty c) <> line <> "}"
     pretty (LRef v) = "*" <> pretty v
     pretty (Filter p c) = "when" <+> parens (pretty p) <+> pretty c
+    pretty (AsyncBind lets bod) = group $ ("async" <+> align (encloseSep open close sep [maybe "" (\x -> pretty x <> " ") op <> pretty k <+> "=" <+> pretty v | (k,op, v) <- lets])) <> line <> "in" <+> pretty bod
+      where
+        open = flatAlt "" "{ "
+        close = flatAlt "" " }"
+        sep = flatAlt "" "; "
     -- pretty (Comprehend bs lets ps ps2 t e) =
             
         
@@ -342,6 +326,8 @@ instance Pretty Lang where
 instance Pretty OpLang where
     pretty (Opaque s) = "#" <> pretty s
     pretty (Union a b) = "Union" <+> pretty a <+> pretty b
+    pretty (Unpack a v c) = group $ "let"<+> align ("Pack" <> align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) <> line' <> "in" <+> pretty c
+    pretty (Lookup table keys assigned body) = group $ "lookup" <+> pretty assigned <+> ":=" <+> align (pretty table <> pretty keys) <+> line' <> "in" <+> pretty body
 -- instance Pretty a => Pretty (Typed a) where
 --     pretty (Typed a AnyType) = pretty a
 --     pretty (Typed a t) = pretty a <> "::" <> pretty t
@@ -360,12 +346,8 @@ pprint :: Pretty a => a -> IO ()
 pprint = putStrLn . prettyS
 
 -- FIXME: shouldn't abstract over toplevel vars into account.
-class FreeVars s where
-    freeVars :: s -> S.Set Var
-instance (FreeVars Lang, Monad m) => MonadGlobals RecLang (StateT (TopLevel' Lang) m)  where
-  tellGlobal k v = modify' $ \tl -> tl { defs = M.insert (Source k) (S.toList $ freeVars v, v) (defs tl) }
--- instance FreeVars Lang where
---   freeVars = mempty
+instance (Monad m) => MonadGlobals RecLang (StateT (TopLevel' Lang) m)  where
+  tellGlobal k v = modify' $ \tl -> tl { defs = M.insert (Source k) ([], v) (defs tl) }
 
 export :: (MonadGlobals RecLang m, MonadRef m) => Lang ->  m Var
 export val = do
@@ -452,7 +434,7 @@ instance (MonadRef m, MonadGlobals RecLang m) => MuRef RecLang m where
     --   where
     --     dyn = toDyn k
     --     var = undefined dyn :: Var
-toTopLevel :: FreeVars Lang => RecLang -> TopLevel' Lang
+toTopLevel :: RecLang -> TopLevel' Lang
 toTopLevel l = unsafePerformIO $ do
    (var, tl) <- runStable $ runStateT (normalize l) (TopLevel M.empty (Source $ Var 0 "<unknown_root>"))
    pure tl { root = Source var }
@@ -473,3 +455,26 @@ type ScopeEnv = M.Map Var ExprType
 --   -- Comprehend _ _ _ _ ety _ -> ety
 --   Return e -> etyOf e
 --   _ -> error "todo"
+
+freeVarsQ :: Data a => a -> S.Set Var
+freeVarsQ = runQ $
+     tryQuery (\_ -> \case
+       LRef @'Flat v -> Just (S.singleton v)
+       _ -> Nothing)
+ |||
+     tryQuery (\_ -> \case
+       (Ref v::Expr) ->   Just (S.singleton v)
+       _ -> Nothing)
+ |||
+     tryQuery (\rec -> \case
+       (Thunk (Source v) ls) ->  Just (S.singleton v <> rec ls))
+ ||| tryQuery (\rec -> \case
+       (w@(AsyncBind a _) :: Lang) -> Just (S.difference (mconcat $ gmapQ rec w) (S.fromList [v|(v,_,_) <-  a]))
+       _ -> Nothing)
+ ||| tryQuery (\rec -> \case
+       (w@(Unpack _ b _) :: OpLang) -> Just (S.difference (mconcat $ gmapQ rec w) (S.fromList b))
+       _ -> Nothing)
+ ||| tryQuery (\rec -> \case
+       (w@Bind {} :: Lang) -> Just (S.delete (boundVar w) (mconcat $ gmapQ rec w))
+       _ -> Nothing)
+ ||| recurse

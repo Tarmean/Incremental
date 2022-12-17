@@ -16,6 +16,10 @@ import qualified Data.Map.Strict as M
 import OpenRec
 import Data.Functor.Identity
 import Data.Semigroup (Max(..))
+import Data.Monoid (First(..))
+import Data.Foldable (asum)
+import Data.Coerce (Coercible, coerce)
+import Control.Monad.Reader (MonadReader, ReaderT)
 
 -- recompExprType :: TypeEnv -> ScopeEnv -> Expr -> ExprType
 -- recompExprType env scope (Ref v) = fromMaybe AnyType (scope LM.!? tyData v <|> tableTys env LM.!? tyData v)
@@ -53,8 +57,6 @@ import Data.Semigroup (Max(..))
 --         scope <- ask
 --         pure $ setExprType e (recompExprType out scope e)
 
-instance FreeVars Lang where
-   freeVars = freeVarsQ
 -- setLangType :: Lang' a -> ExprType -> Lang' a
 -- setLangType l t = case l of
 --   Comprehend {} -> l { eTyp = t }
@@ -67,15 +69,11 @@ instance FreeVars Lang where
 --   BOp _ op a b -> BOp t op a b
 
 
-freeVarsQ :: Data a => a -> S.Set Var
-freeVarsQ = runQ $
-     query (\rec -> \case
-       LRef @'Flat v -> S.singleton v
-       a -> rec a)
- ||| query (\rec -> \case
-       (w@Bind {} :: Lang) -> S.delete (boundVar w) (rec w)
-       a -> rec (a::Lang))
- ||| recurse
+tagWithFrees :: TopLevel -> TopLevel
+tagWithFrees tl = tl { defs = defs' }
+  where
+    defs' = M.map (\(_args, e) -> (escaped e, e)) (defs tl)
+    escaped e = filter (\x -> Source x `M.notMember` defs tl) (S.toList $ freeVarsQ e)
 
 nullTypes :: Data a => a -> a
 nullTypes = runIdentity .: runT $
@@ -85,6 +83,7 @@ nullTypes = runIdentity .: runT $
 newtype VarGenT m a = VarGenT { runVarGenT :: StateT Int m a }
   deriving (Functor, Applicative, Monad, MonadTrans)
   deriving (MonadState s) via Elevator (StateT Int) m
+  deriving (MonadReader s) via Elevator (StateT Int) m
 class Monad m => MonadVar m where
     genVar :: String -> m Var
 instance Monad m => MonadVar (VarGenT m) where
@@ -94,8 +93,11 @@ instance Monad m => MonadVar (VarGenT m) where
         pure (Var i s)
 deriving via Elevator (StateT s) m instance MonadVar m => MonadVar (StateT s m) 
 deriving via Elevator (WriterT s) m instance (Monoid s, MonadVar m) => MonadVar (WriterT s m) 
+deriving via Elevator (ReaderT s) m instance (MonadVar m) => MonadVar (ReaderT s m) 
 instance (MonadTrans t, Monad (t m), MonadVar m) => MonadVar (Elevator t m) where
     genVar = lift . genVar
+withVarGenT :: Monad m => Int -> VarGenT m a -> m a
+withVarGenT i = flip evalStateT i . runVarGenT
 
 -- calcArity :: 
 
@@ -106,24 +108,79 @@ maxVar = getMax . runQ (
      query (\rec -> \case
        LRef @'Flat v -> Max (uniq v)
        a -> rec a)
+ ||| query (\rec -> \case
+       Ref @'Flat v -> Max (uniq v)
+       a -> rec a)
  ||| recurse)
 
-withVarGenT :: Monad m => Int -> VarGenT m a -> m a
-withVarGenT i = flip evalStateT i . runVarGenT
+
+
+bindGuardT :: Lang -> Maybe Lang
+-- bindGuardT a
+--   | trace ("bindGuardT " ++ show a) False = undefined
+bindGuardT (Bind (Filter g (Return Unit)) _ e ) = Just (Filter g e)
+bindGuardT _ = Nothing
+
+bindBindT :: Lang' t -> Maybe (Lang' t)
+bindBindT (Bind (Bind e1 v e2) v' e3) = Just (Bind e1 v (Bind e2 v' e3))
+bindBindT _ = Nothing
+
+bindUnitT :: Lang' t -> Maybe (Lang' t)
+bindUnitT (Bind (Return Unit) _ e) = Just e
+bindUnitT _ = Nothing
+
+bindRightUnitT :: Lang' t -> Maybe (Lang' t)
+bindRightUnitT (Bind m v (Return (Ref v'))) | v == v' = Just m
+bindRightUnitT _ = Nothing
+
+bindLeftUnitT :: Lang -> Maybe Lang
+bindLeftUnitT (Bind (Return a) v e) = Just (subst v a e)
+bindLeftUnitT _ = Nothing
+
+trivialThunk :: Expr -> Maybe Expr
+trivialThunk (AThunk (Thunk (Source s) [])) = Just (Ref s)
+trivialThunk _ = Nothing
+
+simpPass :: Data a => a -> a
+simpPass = runIdentity . runT (
+   recurse >>> completelyTrans @Lang (ala First mconcat [bindGuardT, bindBindT, bindUnitT, bindRightUnitT, bindLeftUnitT]))
+
+ala :: forall s m n a0. (Coercible (m s) (n s)) => (m a0 -> n a0) -> ([n s] -> n s) -> [s -> m s] -> s -> m s
+ala _cons folder args = coerce out
+  where
+     args'  = coerce args :: [s -> n s]
+     out x = folder (args' <&> x)
+     (<&>) fs a= ($ a) <$> fs
+    
+
+subst :: Var -> Expr -> Lang -> Lang
+subst v sub = runIdentity . runT (
+    tryTrans (\case
+       (Ref v'::Expr) | v == v' -> Just sub
+       _ -> Nothing)
+    -- |||
+    -- tryTrans (\case
+    --    (LRef v'::Lang) | v == v' -> Just sub
+    --    _ -> Nothing)
+    ||| recurse)
 
 nestedToThunks :: TopLevel -> TopLevel
-nestedToThunks tl = dropTopLevel $ runIdentity $ runT (trans_ nestToThunk &&& (trans_ collectionArgToFun ||| recurse)) tl
+nestedToThunks tl0 = runIdentity $ runT (trans_ nestToThunk &&& trans_ dropDumbThunk &&& recurse) tl
   where
+    tl = tagWithFrees tl0
     nestToThunk :: Expr -> Identity Expr
-    nestToThunk (Nest (LRef r)) = pure $ AThunk (Thunk (Source r) [])
+    nestToThunk (Nest (LRef r)) = pure $ AThunk (Thunk (Source r) (argsOf r))
+    nestToThunk (AggrNested op (LRef r)) = pure $ Aggr op (Thunk (Source r) (argsOf r))
     nestToThunk a = pure a
-    argsOf :: Var -> [Local]
+    dropDumbThunk :: Expr -> Identity Expr
+    dropDumbThunk (AThunk (Thunk (Source a) [])) = pure $ Ref a
+    dropDumbThunk a = pure a
+    argsOf :: Var -> [Var]
     argsOf v = case LM.lookup (Source v) (defs tl) of
+      Just ([], _) -> error (show v <> " Did you forgot to run optPass before nestedToThunks?")
       Just (args, _) -> args
-      Nothing -> error "Undefined function"
-    collectionArgToFun :: SomeArg -> Identity SomeArg
-    collectionArgToFun (ThunkArg (Source l) t []) = pure (ThunkArg (Source l) t (fmap Ref (argsOf l)))
-    collectionArgToFun other = pure other
+      Nothing 
+        | otherwise -> error ("Undefined function" <> show v)
 dropTopLevel :: TopLevel' p -> TopLevel' p
 dropTopLevel a = a { defs = M.map dropDefs (defs a) }
   where

@@ -5,6 +5,8 @@ module OpenRec where
 
 import Data.Data hiding (gmapM)
 import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter)
+import Control.Monad ((<=<))
+import Control.Monad.Identity (Identity(..))
 -- import Control.Monad.Writer.Strict (WriterT, runWriterT, tell)
 
 (.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
@@ -50,12 +52,18 @@ infixl 2 >>>
 (>>>) :: Monad m => Trans m -> Trans m -> Trans m
 T l >>> T r = T $ \c@Ctx{..} -> l (Ctx (r c) onFailure onRecurse)
 
-recurse :: Trans m
-recurse = T $ \Ctx{..} -> onRecurse
+recurse :: Monad m => Trans m
+recurse = T $ \Ctx{..} -> onSuccess <=< onRecurse
 
 query :: forall a o. (Monoid o, Data a) => ((forall x. Data x => x -> o) -> a -> o) -> Trans (Writer o)
 query f = T $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> a' <$ tell (f (execWriter . onRecurse) a')
+  Nothing -> onFailure a'
+tryQuery :: forall a o. (Monoid o, Data a) => ((forall x. Data x => x -> o) -> a -> Maybe o) -> Trans (Writer o)
+tryQuery f = T $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
+  Just Refl -> case f (execWriter . onRecurse . Identity) a' of
+      Nothing -> onFailure a'
+      Just o -> tell o >> onSuccess a'
   Nothing -> onFailure a'
 
 trans :: forall a m. (Monad m, Data a) => (Trans1 m -> a -> m a) -> Trans m
@@ -67,6 +75,26 @@ trans_ :: forall a m. (Monad m, Data a) => (a -> m a) -> Trans m
 trans_ f = T $ \Ctx{..} (a::a') -> case eqT @a @a' of
   Just Refl -> onSuccess =<< f a
   Nothing -> onFailure a
+tryTrans :: forall a m. (Monad m, Data a) => (a -> Maybe a) -> Trans m
+tryTrans f = T $ \Ctx{..} (a::a') -> case eqT @a @a' of
+  Just Refl -> case f a of
+     Nothing -> onFailure a
+     Just a' -> onSuccess a'
+  Nothing -> onFailure a
+
+tryTransM :: forall a m. (Monad m, Data a) => (Trans1 m -> a -> Maybe (m a)) -> Trans m
+tryTransM f = T $ \Ctx{..} (a::a') -> case eqT @a @a' of
+  Just Refl -> case f (fmap runIdentity . onRecurse . Identity) a of
+     Nothing -> onFailure a
+     Just ma' -> onSuccess =<< ma'
+  Nothing -> onFailure a
+
+completelyTrans :: forall a m. (Monad m, Data a) => (a -> Maybe a) -> Trans m
+completelyTrans f = tryTrans (fixpoint False)
+  where
+    fixpoint suc a = case f a of
+      Nothing -> if suc then Just a else Nothing
+      Just a' -> fixpoint True a'
 
 -- stop recursion here, nested `recurse` statements will jump to the block
 block :: forall m. Trans m -> Trans m

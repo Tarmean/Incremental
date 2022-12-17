@@ -38,7 +38,6 @@ testRightNest = M.do
        f <- table "foo"
        guards (a .== f)
        M.pure f
-       -- M.guards (Eql f a)
    M.pure (Tuple [a, b])
 guards :: Expr' 'Rec -> RecLang
 guards e = Filter e (Return Unit)
