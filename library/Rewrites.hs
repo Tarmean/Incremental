@@ -7,7 +7,7 @@ module Rewrites where
 import CompileQuery
 import Control.Monad.Trans
 import Control.Monad.Trans.Elevator
-import Control.Monad.State
+import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
 import Data.Data
 import qualified Data.Set as S
@@ -99,6 +99,9 @@ instance (MonadTrans t, Monad (t m), MonadVar m) => MonadVar (Elevator t m) wher
 withVarGenT :: Monad m => Int -> VarGenT m a -> m a
 withVarGenT i = flip evalStateT i . runVarGenT
 
+withVarGenT' :: Int -> VarGenT m a -> m (a, Int)
+withVarGenT' i = flip runStateT i . runVarGenT
+
 -- calcArity :: 
 
 
@@ -141,9 +144,18 @@ trivialThunk :: Expr -> Maybe Expr
 trivialThunk (AThunk (Thunk (Source s) [])) = Just (Ref s)
 trivialThunk _ = Nothing
 
+trivPack :: Expr -> Maybe Expr
+trivPack (Pack [x]) = Just (Ref x)
+trivPack _ = Nothing
+
 simpPass :: Data a => a -> a
 simpPass = runIdentity . runT (
-   recurse >>> completelyTrans @Lang (ala First mconcat [bindGuardT, bindBindT, bindUnitT, bindRightUnitT, bindLeftUnitT]))
+   recurse >>> completelyTrans' (langRewrites ||| exprRewrites))
+  where
+   langRewrites = tryTrans $ useFirst [bindGuardT, bindBindT, bindUnitT, bindRightUnitT, bindLeftUnitT]
+   exprRewrites = tryTrans trivPack
+   useFirst = ala First mconcat
+
 
 ala :: forall s m n a0. (Coercible (m s) (n s)) => (m a0 -> n a0) -> ([n s] -> n s) -> [s -> m s] -> s -> m s
 ala _cons folder args = coerce out

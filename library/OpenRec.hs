@@ -7,6 +7,7 @@ import Data.Data hiding (gmapM)
 import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter)
 import Control.Monad ((<=<))
 import Control.Monad.Identity (Identity(..))
+import Control.Applicative ((<|>))
 -- import Control.Monad.Writer.Strict (WriterT, runWriterT, tell)
 
 (.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
@@ -43,6 +44,14 @@ gmapM f = gfoldl k pure
 infixl 1 |||
 (|||) :: Trans m -> Trans m -> Trans m
 T l ||| T r = T $ \c@Ctx {onSuccess, onRecurse} -> l (Ctx onSuccess (r c) onRecurse)
+
+(.|||) :: (a -> Maybe a) -> (a -> Maybe a) -> a -> Maybe a
+f .||| g = \x -> f x <|> g x
+
+tryType :: forall a b. (Typeable a, Typeable b) => (a -> Maybe a) -> (b -> Maybe b)
+tryType a x = case eqT @a @b of
+  Just Refl -> a x
+  _ -> Nothing
 
 infixl 1 &&&
 (&&&) :: Monad m => Trans m -> Trans m -> Trans m
@@ -88,6 +97,14 @@ tryTransM f = T $ \Ctx{..} (a::a') -> case eqT @a @a' of
      Nothing -> onFailure a
      Just ma' -> onSuccess =<< ma'
   Nothing -> onFailure a
+
+completelyTrans' :: forall m. (Monad m) => Trans m -> Trans m
+completelyTrans' f = T $ \Ctx{..} a0 -> 
+  let 
+    fixCtx suc = Ctx { onSuccess = fixpoint True, onFailure = if suc then onSuccess else onFailure, onRecurse = onRecurse }
+    fixpoint :: Data a => Bool -> a -> m a
+    fixpoint suc = withCtx f (fixCtx suc)
+  in fixpoint False a0
 
 completelyTrans :: forall a m. (Monad m, Data a) => (a -> Maybe a) -> Trans m
 completelyTrans f = tryTrans (fixpoint False)

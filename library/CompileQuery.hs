@@ -224,18 +224,19 @@ langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLang
 
     
 instance TraverseP Lang' where
-    traverseP f (Bind l v l') = Bind <$> traverseP f l <*> pure  v <*> traverseP f l'
-    traverseP f (Filter e l) = Filter <$> traverseP f e <*> traverseP f l
+    traverseP f (Bind l v l') = Bind <$> f l <*> pure  v <*> f l'
+    traverseP f (Filter e l) = Filter <$> traverseP f e <*> f l
     traverseP f (Return e) = Return <$> traverseP f e
     traverseP f (OpLang op) = OpLang <$> traverseP f op
     traverseP _ (LRef v) = pure (LRef v)
-    traverseP f (AsyncBind ls l) = AsyncBind ls <$> traverseP f l
+    traverseP f (AsyncBind ls l) = AsyncBind ls <$> f l
     traverseP _ (FBind _ _) = undefined -- FBind <$> (traverseP f l) <*> (traverseP f . g)
 data OpLang' (t::Phase)
   = Opaque String
   | Union (Lang' t) (Lang' t)
   | Unpack { unpack :: Lang' t, labels :: [Var], unpackBody :: Lang' t }
   | Lookup { lookupTable :: Source, keys :: [Var], assigned :: Var, lookupBody :: Lang' t}
+  | Group { groupBy :: AggrOp, groupBody :: Lang' t }
 type OpLang = OpLang' 'Flat
 deriving instance Eq OpLang
 deriving instance Ord OpLang
@@ -246,6 +247,7 @@ instance TraverseP OpLang' where
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
     traverseP f (Unpack a b c) = Unpack <$> f a <*> pure b <*> f c
     traverseP f (Lookup a b c d) = Lookup a b c <$> f d
+    traverseP f (Group a c) = Group a <$> f c
 type Lang = Lang' 'Flat
 type RecLang = Lang' 'Rec
 newtype Source = Source { unSource :: Var}
@@ -326,8 +328,9 @@ instance Pretty Lang where
 instance Pretty OpLang where
     pretty (Opaque s) = "#" <> pretty s
     pretty (Union a b) = "Union" <+> pretty a <+> pretty b
-    pretty (Unpack a v c) = group $ "let"<+> align ("Pack" <> align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) <> line' <> "in" <+> pretty c
-    pretty (Lookup table keys assigned body) = group $ "lookup" <+> pretty assigned <+> ":=" <+> align (pretty table <> pretty keys) <+> line' <> "in" <+> pretty body
+    pretty (Unpack a v c) = group $ "let"<+> align ("Pack" <> align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) <> line <> "in" <+> pretty c
+    pretty (Lookup table keys assigned body) = group $ "lookup" <+> pretty assigned <+> ":=" <+> align (pretty table <> pretty keys) <> line <> "in" <+> pretty body
+    pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
 -- instance Pretty a => Pretty (Typed a) where
 --     pretty (Typed a AnyType) = pretty a
 --     pretty (Typed a t) = pretty a <> "::" <> pretty t

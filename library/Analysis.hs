@@ -87,7 +87,7 @@ type Usages = M.Map Var Usage
 
 
 analyzeArity :: TopLevel -> MonoidMap Var Usage
-analyzeArity tl=  MonoidMap (recs M.! unSource (root tl))
+analyzeArity tl=  MonoidMap (M.insert (unSource $ root tl) Many $ recs M.! unSource (root tl))
   where
     defUsage = M.mapKeys unSource (M.map theQ (defs tl))
     recs = fixTransitive @_ @Usage $ coerce defUsage
@@ -95,6 +95,14 @@ analyzeArity tl=  MonoidMap (recs M.! unSource (root tl))
       query (\rec -> \case
         (Ref  v::Expr) -> MonoidMap (M.singleton v Once)
         a -> rec a)
+     |||
+      tryQuery (\rec -> \case
+        (Lookup s args bound bod ::OpLang) -> 
+          let s' = unSource s
+              recBod = rec bod 
+              boundUsage = M.findWithDefault None bound (unMonoidMap recBod)
+          in Just $ recBod <> rec args <> MonoidMap (M.singleton s' (min Once boundUsage))
+        _ -> Nothing)
      |||
       query (\rec -> \case
         (LRef v::Lang) -> MonoidMap (M.singleton v Once)
@@ -115,13 +123,14 @@ m !!! k = case M.lookup k m of
 
 simpleBind :: Lang -> Bool
 simpleBind (Return _) = True
+simpleBind (OpLang (Opaque _)) = True
 simpleBind (Bind _ b (Return c))
   | Ref b == c = True
 simpleBind _ = False
 
 -- simpleBinds :: TopLevel -> [Source]
-simpleBinds :: M.Map b (a, Lang) -> [b]
-simpleBinds def = map fst . filter (simpleBind . snd . snd) $ M.toList def
+simpleBinds :: M.Map b Lang -> M.Map b Lang 
+simpleBinds = M.filter simpleBind
 
 withArity :: Usage -> MonoidMap Var Usage -> [Var]
 withArity us (MonoidMap m) = map fst . filter ((==us) . snd) $ M.toList m
@@ -185,19 +194,31 @@ doInlines arities tl = tl {
     defs' = M.map (second (inlineLang inlines)) (defs tl)
     inlines = gatherInlines tl arities defs'
 gatherInlines :: TopLevel -> MonoidMap Var Usage -> M.Map Source ([Var], Lang) -> M.Map Var Lang
-gatherInlines tl arities theDefs = inlines
+gatherInlines tl arities theDefs = M.union simples inlines
   where
-    toInline = simples <> withArity Once arities
+    toInline = withArity Once arities
     avoids = avoidInline (defs tl)
-    inlines = M.fromList [ (v, def) | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v]]
-    simples = unSource <$> simpleBinds (defs tl)
+    inlines = M.fromList [ (v, def) | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v], inlinable def]
+    simples = simpleBinds (M.map snd $ M.mapKeysMonotonic unSource $ defs tl)
 
 inlinable :: Lang -> Bool
 -- inlinable (Comprehend {}) = True
 -- inlinable (Return {}) = True
+inlinable (OpLang Group{}) = False
 inlinable _ = True
 
 
 optPass :: TopLevel -> TopLevel
-optPass tl = doInlines multiplicities $ dropUseless multiplicities tl
-  where multiplicities = analyzeArity tl
+optPass tl = dropUseless multiplicities $ doInlines multiplicities $ dropUseless multiplicities tl
+  where
+    multiplicities = analyzeArity tl
+
+dropUnused :: MonoidMap Var Usage -> TopLevel -> TopLevel
+dropUnused m tl = tl {
+    defs = out
+ }
+  where
+    unused = S.fromList $ withArity None m
+    isUnused x = x `S.member` unused || M.notMember x (unMonoidMap m)
+    out = M.filterWithKey (\k _ -> not $ isUnused (unSource k)) (defs tl)
+

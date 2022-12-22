@@ -18,9 +18,12 @@ import CompileQuery
 import OpenRec
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Rewrites (VarGenT, withVarGenT, genVar, maxVar)
+import Rewrites (VarGenT, withVarGenT, genVar, maxVar, withVarGenT')
 import Control.Monad.State
-import Control.Monad.Reader
+import Data.Maybe (fromMaybe)
+import Control.Applicative ((<|>))
+import Data.Foldable (foldl')
+import Data.Functor.Identity (Identity (runIdentity))
 import Debug.Trace (traceM)
 
 
@@ -29,51 +32,95 @@ data CTEnv = CTEnv {
     nameGen :: Int,
     locals :: S.Set Var,
     generatedBindings :: M.Map Source Lang,
-    generatedRequests :: [(Source, [Local], Source, Maybe AggrOp)]
+    generatedRequests :: [(Source, [Local], Source, Maybe AggrOp)],
+    lastLabel :: Source,
+    firstLabel :: Maybe Source
 }
-type M = ReaderT Source (VarGenT (State CTEnv))
+type M = VarGenT (State CTEnv)
+
 
 
 doCoroutineTransform :: TopLevel -> TopLevel
-doCoroutineTransform tl = tl' { defs = M.union (M.map ([],) (generatedBindings env')) (defs tl') }
+doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (generatedBindings env')) $ defs tl' }
   where
-    (tl', env') = runState (withVarGenT (maxVar tl) out) env0
-    env0 = CTEnv 0 S.empty M.empty []
+    ((tl', varGen'), env') = runState (withVarGenT' (maxVar tl) out) env0
+    env0 = CTEnv 0 S.empty M.empty [] (root tl) Nothing
+    collectFree a = freeVarsQ a S.\\  S.fromList (map unSource $ M.keys $ defs tl)
+
     out = do
-      defs' <- flip M.traverseWithKey (defs tl) $ \k (_args, e) -> do
-        e <- runReaderT (runT coroutineTransform e) k
-        pure (_args, e)
-      pure $ tl { defs = defs' }
+      defs' <- forM (M.toList $ defs tl) $ \(k, (_args, e)) -> do
+        modify $ \s -> s { firstLabel = Nothing, lastLabel = k }
+        e <- runT (coroutineTransform collectFree) e
+        ll <- gets lastLabel
+        modify $ \s -> s { generatedBindings = renameEntry ll k (generatedBindings s) }
+        fl <- gets firstLabel
+        pure (fromMaybe k fl, (_args, e))
+      pure $ tl { defs = M.fromList defs' }
+
+    sources = M.fromListWith (<>) [ (funTable, [(source, locals)]) | (funTable, locals, source, _) <- generatedRequests env' ]
+    aggregates = M.fromListWith (<>) [ (funTable, [op]) | (funTable, _locals, _source, Just op) <- generatedRequests env' ]
+    funs = runIdentity $ withVarGenT varGen' $ fmap (M.fromListWith (error "key collision") . concat) $ traverse (uncurry doFun) $ M.toList $ M.filter (not . null . fst) (defs tl)
+    -- !_ = error (show sources)
+    doFun k (args, body) = do
+       body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Pack args, x]) body)
+       let aggs = doAggregates k ops
+       traceM (show ops)
+       pure $ (k, ([], body')):aggs
+      where
+        inputs = M.findWithDefault [] k sources
+        ops = M.findWithDefault [] k aggregates
+
+mapExpr :: (Expr -> Expr) -> Lang -> Lang
+mapExpr f (Return a) = Return $ f a
+mapExpr f (Bind a v b) = Bind a v (mapExpr f b)
+mapExpr f a = runIdentity $ traverseP (pure . mapExpr f) a
+
+doAggregates :: Source -> [AggrOp] -> [(Source, ([a], Lang))]
+doAggregates (Source (Var i s)) aggs = [ (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group agg (LRef $ Var i s))) | agg <- aggs ]
+
+loadInputs :: [Var] -> [(Source, [Local])] -> Lang -> VarGenT Identity Lang
+loadInputs _ [] body = pure body
+loadInputs locs inps body = do
+   let sources =   foldl1 (\a b -> OpLang (Union a b)) (fmap (LRef . unSource . fst) inps)
+   l <- genVar "l"
+   pure $ Bind  sources l (OpLang $ Unpack (LRef l) locs body)
+
+renameEntry :: Source -> Source -> M.Map Source Lang -> M.Map Source Lang
+renameEntry old new m = case m M.!? old of
+    Just v -> M.insert new v (M.delete old m)
+    Nothing -> m
 
 
-tellRequest :: (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
-tellRequest (v, op, Thunk sym args) lan = do
-    s <- genVar "p"
+tellRequest :: Var -> (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
+tellRequest s (v, op, Thunk sym args) lan = do
     modify $ \env -> env { generatedRequests = (sourceToRequest sym, args, Source s, op) : generatedRequests env }
     pure $ OpLang $ Lookup (Source $ sourceToOp op sym) args v lan
 
-tellRequests :: [(Var, Maybe AggrOp, Thunk)] -> Lang -> M Lang
-tellRequests [] lan = pure lan
-tellRequests (x:xs) lan = do
-    r <- tellRequests xs lan
-    tellRequest x r
+tellRequests :: Var -> [(Var, Maybe AggrOp, Thunk)] -> Lang -> M Lang
+tellRequests _ [] lan = pure lan
+tellRequests v (x:xs) lan = do
+    r <- tellRequests v xs lan
+    tellRequest v x r
 
 sourceToOp :: Maybe AggrOp -> Source -> Var
 sourceToOp Nothing (Source s) = s
 sourceToOp (Just op) (Source (Var i v)) = Var i (v ++ "_" ++ show op)
 sourceToRequest :: Source -> Source
-sourceToRequest (Source (Var i v)) = Source $ Var i (v ++ "_request")
+sourceToRequest (Source (Var i v)) = Source $ Var i v
 
-coroutineTransform :: Trans M
-coroutineTransform = tryTransM (\rec -> \case
+coroutineTransform :: (Lang -> S.Set Var) -> Trans M
+coroutineTransform freeVars = tryTransM (\rec -> \case
     w@(AsyncBind binds e :: Lang) -> Just $ do
-      let frees = freeVarsQ w
-      root <- ask
-      tempVar <- genVar "temp"
-      out <- tellRequests binds =<< local (const (Source tempVar)) (rec e)
+      let frees = freeVars w
+      stash <- genVar "stash"
+      -- old <- gets label
+      -- tempVar <- genVar "temp"
+      out <- tellRequests stash binds =<< rec e
       bindVar <- genVar "l"
-      let nested = Bind (LRef $ unSource root) bindVar (OpLang $ Unpack (LRef bindVar) (S.toList frees) out)
-      tellGenerated tempVar nested
+      outLabel <- genVar "out"
+      let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (LRef bindVar) (S.toList frees) out)
+      tellGenerated outLabel nested
+      modify $ \s -> s { firstLabel = firstLabel s <|> Just (Source stash), lastLabel = Source outLabel }
       pure (Return (Pack (S.toList frees)))
     _ -> Nothing)
     ||| recurse
