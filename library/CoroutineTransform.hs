@@ -64,7 +64,6 @@ doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (gene
     doFun k (args, body) = do
        body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Pack args, x]) body)
        let aggs = doAggregates k ops
-       traceM (show ops)
        pure $ (k, ([], body')):aggs
       where
         inputs = M.findWithDefault [] k sources

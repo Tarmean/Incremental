@@ -1,43 +1,52 @@
 {-# LANGUAGE QualifiedDo #-}
 {-# LANGUAGE DataKinds #-}
+{-# OPTIONS_GHC -Wno-unused-do-bind #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Redundant M.pure" #-}
 module Test where
 import qualified MonadSyntax as M
 import CompileQuery
 
 
-table :: String -> RecLang
-table s = OpLang (Opaque s)
+table :: String -> [ExprType] -> RecLang
+table s tys = OpLang (HasType (OpLang (Opaque s)) (ListTy $ TupleTyp tys))
 
+userTable :: RecLang
+userTable = table "user" [intTy]
+barTable :: RecLang
+barTable = table "bar" [intTy]
+fooTable :: RecLang
+fooTable = table "foo" [intTy]
 testQ :: RecLang
 testQ = M.do
-   a <- table "user"
+   a <- userTable
    _ <- testQ
    M.return a
   
    
 testFlat :: RecLang
 testFlat = M.do
-   let a = table "user"
+   let a = userTable
    _ <- a
    _ <- a
-   o <- table "bar"
+   o <- barTable
    M.pure o
 
 testLeftNest :: RecLang
 testLeftNest = M.do
    M.do
-       _ <- table "user"
-       table "foo"
-   M.pure (nest $ table "bar")
+       _ <- userTable
+       fooTable
+   M.pure (nest barTable)
 
 testRightNest :: RecLang
 testRightNest = M.do
-   a <- table "user"
+   a <- userTable
    let
     b = AggrNested SumT $ M.do
-       f <- table "foo"
+       f <- fooTable
        guards (a .== f)
-       M.pure f
+       M.pure (Proj 0 f)
    M.pure (Tuple [a, b])
 guards :: Expr' 'Rec -> RecLang
 guards e = Filter e (Return Unit)

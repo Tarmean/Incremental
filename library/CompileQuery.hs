@@ -81,21 +81,7 @@ import OpenRec
 
 class TraverseP f where
    traverseP :: (HasCallStack, Applicative m) => (Lang' p -> m (Lang' q)) -> f p -> m (f q)
-data SomeArg' p = ValArg (Expr' p) | ThunkArg Source ExprType [Expr' p]
-deriving instance Eq SomeArg 
-deriving instance Ord SomeArg 
-deriving instance Show SomeArg 
-deriving instance Data SomeArg 
-deriving instance Typeable p => Typeable (SomeArg' p) 
-instance TraverseP SomeArg'  where
-   traverseP f (ValArg e) = ValArg <$> traverseP f e
-   -- traverseP f (CollArg l) = CollArg <$> traverseP f l
-   traverseP f (ThunkArg s t es) = ThunkArg s t <$> traverse (traverseP f) es
 
-   -- foldP f (ValArg e) = foldP f e
-type SomeArg = SomeArg' 'Flat
--- data Typed Var = Typed Var { tvVar :: Var, tvType :: ExprType }
---   deriving (Eq, Ord, Show, Data)
 data Typed a = Typed { tyData :: a, tyType :: ExprType }
   deriving (Eq, Ord, Show, Data, Functor, Foldable, Traversable)
 data Thunk = Thunk { atSource :: Source, atArgs :: [Var] }
@@ -109,14 +95,15 @@ instance Pretty Thunk where
 data Expr' (p::Phase) where
     Ref :: Var -> Expr' p
     AThunk :: Thunk -> Expr' p
-    Proj :: ExprType -> Int -> (Expr' p) -> Expr' p
-    BOp :: ExprType -> BOp -> (SomeArg' p) -> (SomeArg' p) -> Expr' p
+    Proj :: Int -> (Expr' p) -> Expr' p
+    BOp :: BOp -> Expr' p -> Expr' p -> Expr' p
     Unit :: Expr' p
     Tuple :: [Expr' p] -> Expr' p
     Aggr :: AggrOp -> Thunk -> Expr' p
     AggrNested :: AggrOp -> (Lang' p) -> Expr' p
     Nest :: Lang' a -> Expr' a
     Pack :: {  packLabels :: [Var] } ->  Expr' p
+    HasEType :: Expr' p -> ExprType -> Expr' p
 deriving instance Eq Expr
 deriving instance Ord Expr
 deriving instance Show Expr
@@ -126,47 +113,50 @@ deriving instance Data Expr
 instance TraverseP Expr'  where
    traverseP _ (Ref a) = pure (Ref a)
    traverseP _ (AThunk a) = pure $ AThunk a
-   traverseP f (Proj t i e) = Proj t i <$> traverseP f e
-   traverseP f (BOp t op a b) = BOp t op <$> traverseP f a <*> traverseP f b
+   traverseP f (Proj i e) = Proj i <$> traverseP f e
+   traverseP f (BOp op a b) = BOp op <$> traverseP f a <*> traverseP f b
    traverseP _ Unit = pure Unit
    traverseP f (Tuple es) = Tuple <$> traverse (traverseP f) es
    traverseP f (AggrNested op a) = AggrNested op <$> f a
    traverseP _ (Aggr _ _) = error "aggr"
    traverseP f (Nest o) = Nest <$> f o
    traverseP _ (Pack ls) = pure $ Pack ls
+   traverseP f (HasEType ex t) = HasEType <$> traverseP f ex <*> pure t
    -- traverseP f (Unpack e ls b) = Unpack <$> traverseP f e <*> pure ls <*> traverseP f b
 (.==) :: Expr' p -> Expr' p -> Expr' p
-(.==) a  b = BOp AnyType Eql (ValArg a) (ValArg b)
+(.==) = BOp Eql
 data AggrOp = SumT | MinT | MaxT
   deriving (Eq, Ord, Show, Data)
 type Expr = Expr' 'Flat
-data ExprType = EBase TypeRep | TupleTyp [ExprType] | ThunkTy [Fun] ExprType | AnyType
-  deriving (Eq, Ord, Show)
+data ExprType = EBase TypeRep | TupleTyp [ExprType] | ThunkTy [Fun] ExprType | ListTy ExprType
+  deriving (Eq, Ord, Show, Typeable)
+intTy :: ExprType
+intTy = EBase (typeRep (Proxy :: Proxy Int))
 
 instance Data ExprType where
     gfoldl _ z a@EBase {} = z a
     gfoldl k z (TupleTyp ls)       = z TupleTyp `k` ls
     gfoldl k z (ThunkTy fs t) = z ThunkTy `k` fs `k` t
-    gfoldl _ z AnyType = z AnyType
+    gfoldl k z (ListTy v) = z ListTy `k` v
 
     gunfold k z c
       = case constrIndex c of
-        4 -> z AnyType
+        4 -> k (z ListTy)
         3 -> k (k (z ThunkTy))
         2 -> k (z TupleTyp)
-        1 -> z AnyType
+        1 -> k (z ListTy)
         _ -> error "illegal constructor index"
 
     toConstr EBase {} = eBaseConstr
-    toConstr AnyType {} = eAnyTypeConstr
+    toConstr ListTy {} = eListTypeConstr
     toConstr TupleTyp {} = eTupleConstr
     toConstr ThunkTy {} = thunkConstr
 
     dataTypeOf _ = exprTypeDataType
 
-eBaseConstr, eAnyTypeConstr, eTupleConstr, thunkConstr :: Constr
+eBaseConstr, eListTypeConstr, eTupleConstr, thunkConstr :: Constr
 eBaseConstr = mkConstr exprTypeDataType "EBase" [] Prefix
-eAnyTypeConstr = mkConstr exprTypeDataType "AnyType" [] Prefix
+eListTypeConstr = mkConstr exprTypeDataType "AnyType" [] Prefix
 eTupleConstr = mkConstr exprTypeDataType "Tuple" [] Prefix
 thunkConstr = mkConstr exprTypeDataType "Thunk" [] Prefix
 exprTypeDataType :: DataType
@@ -237,6 +227,7 @@ data OpLang' (t::Phase)
   | Unpack { unpack :: Lang' t, labels :: [Var], unpackBody :: Lang' t }
   | Lookup { lookupTable :: Source, keys :: [Var], assigned :: Var, lookupBody :: Lang' t}
   | Group { groupBy :: AggrOp, groupBody :: Lang' t }
+  | HasType { hasType :: Lang' t, hasTypeType :: ExprType }
 type OpLang = OpLang' 'Flat
 deriving instance Eq OpLang
 deriving instance Ord OpLang
@@ -248,6 +239,7 @@ instance TraverseP OpLang' where
     traverseP f (Unpack a b c) = Unpack <$> f a <*> pure b <*> f c
     traverseP f (Lookup a b c d) = Lookup a b c <$> f d
     traverseP f (Group a c) = Group a <$> f c
+    traverseP f (HasType a b) = HasType <$> f a <*> pure b
 type Lang = Lang' 'Flat
 type RecLang = Lang' 'Rec
 newtype Source = Source { unSource :: Var}
@@ -274,27 +266,25 @@ instance Pretty ExprType where
     pretty (EBase t) = pretty (show t)
     pretty (TupleTyp ts) = parens (hsep (punctuate comma (map pretty ts)))
     pretty (ThunkTy fs t) = parens (hsep (punctuate comma (map pretty fs)) <+> "->" <+> pretty t)
-    pretty AnyType = "AnyType"
+    pretty (ListTy l) = brackets (pretty l)
 instance Pretty BOp where
     pretty Eql = "=="
-instance Pretty SomeArg where
-    pretty (ValArg e) = pretty e
-    pretty (ThunkArg f _ es) = pretty f <> parens (hsep (punctuate comma (map pretty es)))
 instance Pretty AggrOp where
     pretty SumT = "SUM"
     pretty MinT = "MIN"
     pretty MaxT = "MAX"
 instance Pretty Expr where
     pretty (Ref t) = pretty t
-    pretty (Proj t i e) = pretty e <> "." <> pretty i <> "::" <> pretty t
-    pretty (BOp t op e1 e2) = pretty e1 <+> pretty op <+> pretty e2 <> "::" <> pretty t
+    pretty (Proj i e) = pretty e <> "." <> pretty i
+    pretty (BOp op e1 e2) = pretty e1 <+> pretty op <+> pretty e2
     pretty Unit = "()"
     pretty (Aggr op v) = pretty op <> "(" <>  pretty v <> ")"
     pretty (AggrNested op v) = pretty op <> "(" <>  pretty v <> ")"
     pretty (Tuple es) = tupled (map pretty es)
     pretty (AThunk a) = pretty a
     pretty (Nest a) = "Nest" <+> pretty a
-    pretty (Pack a) = "Pack" <> tupled (map pretty a)
+    pretty (Pack a) = tupled (map pretty a)
+    pretty (HasEType e ty) = pretty e <+> "::" <+> pretty ty
 instance Pretty Lang where
     pretty (Bind a b c) = group $ nest 2 $ "for" <+> pretty b <+> "in" <+> align (pretty a) <+> "{" <> nest 2 (line <> pretty c) <> line <> "}"
     pretty (LRef v) = "*" <> pretty v
@@ -328,9 +318,10 @@ instance Pretty Lang where
 instance Pretty OpLang where
     pretty (Opaque s) = "#" <> pretty s
     pretty (Union a b) = "Union" <+> pretty a <+> pretty b
-    pretty (Unpack a v c) = group $ "let"<+> align ("Pack" <> align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) <> line <> "in" <+> pretty c
-    pretty (Lookup table keys assigned body) = group $ "lookup" <+> pretty assigned <+> ":=" <+> align (pretty table <> pretty keys) <> line <> "in" <+> pretty body
+    pretty (Unpack a v c) = group $ "let"<+> align (align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) <> line <> "in" <+> pretty c
+    pretty (Lookup table keys assigned body) = group $ pretty assigned <+> ":=" <+> align (pretty table <> pretty keys) <> line <> "in" <+> pretty body
     pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
+    pretty (HasType e t) = pretty e <+> "::" <+> pretty t
 -- instance Pretty a => Pretty (Typed a) where
 --     pretty (Typed a AnyType) = pretty a
 --     pretty (Typed a t) = pretty a <> "::" <> pretty t

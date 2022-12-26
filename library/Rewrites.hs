@@ -119,8 +119,6 @@ maxVar = getMax . runQ (
 
 
 bindGuardT :: Lang -> Maybe Lang
--- bindGuardT a
---   | trace ("bindGuardT " ++ show a) False = undefined
 bindGuardT (Bind (Filter g (Return Unit)) _ e ) = Just (Filter g e)
 bindGuardT _ = Nothing
 

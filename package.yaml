@@ -29,6 +29,7 @@ library:
   - deriving-trans
   - syb
   - prettyprinter
+  - QuickCheck
   source-dirs: library
 
 executables:
