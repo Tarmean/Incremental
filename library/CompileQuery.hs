@@ -227,6 +227,8 @@ data OpLang' (t::Phase)
   | Unpack { unpack :: Lang' t, labels :: [Var], unpackBody :: Lang' t }
   | Lookup { lookupTable :: Source, keys :: [Var], assigned :: Var, lookupBody :: Lang' t}
   | Group { groupBy :: AggrOp, groupBody :: Lang' t }
+  | Call { nestedCall :: Expr' t }
+  | Force { thunked :: Thunk }
   | HasType { hasType :: Lang' t, hasTypeType :: ExprType }
 type OpLang = OpLang' 'Flat
 deriving instance Eq OpLang
@@ -240,6 +242,8 @@ instance TraverseP OpLang' where
     traverseP f (Lookup a b c d) = Lookup a b c <$> f d
     traverseP f (Group a c) = Group a <$> f c
     traverseP f (HasType a b) = HasType <$> f a <*> pure b
+    traverseP f (Call b) = Call <$> traverseP f b
+    traverseP _ (Force b) = pure $ Force b
 type Lang = Lang' 'Flat
 type RecLang = Lang' 'Rec
 newtype Source = Source { unSource :: Var}
@@ -322,6 +326,8 @@ instance Pretty OpLang where
     pretty (Lookup table keys assigned body) = group $ pretty assigned <+> ":=" <+> align (pretty table <> pretty keys) <> line <> "in" <+> pretty body
     pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
     pretty (HasType e t) = pretty e <+> "::" <+> pretty t
+    pretty (Call e) = "?" <> pretty e
+    pretty (Force t) = "!" <> pretty t
 -- instance Pretty a => Pretty (Typed a) where
 --     pretty (Typed a AnyType) = pretty a
 --     pretty (Typed a t) = pretty a <> "::" <> pretty t

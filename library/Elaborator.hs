@@ -15,7 +15,6 @@ import qualified Data.Typeable as Ty
 import Data.Kind (Type)
 import Data.Bifunctor (second)
 
-
 -- for now, only do nonrecursive definitions via an implicit topo sort
 elaborate :: TopLevel -> TopLevel
 elaborate tl = tl { defs = defs' }

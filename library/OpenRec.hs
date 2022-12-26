@@ -8,6 +8,7 @@ import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter)
 import Control.Monad ((<=<))
 import Control.Monad.Identity (Identity(..))
 import Control.Applicative ((<|>))
+import Debug.Trace (trace)
 -- import Control.Monad.Writer.Strict (WriterT, runWriterT, tell)
 
 (.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
@@ -101,7 +102,7 @@ tryTransM f = T $ \Ctx{..} (a::a') -> case eqT @a @a' of
 completelyTrans' :: forall m. (Monad m) => Trans m -> Trans m
 completelyTrans' f = T $ \Ctx{..} a0 -> 
   let 
-    fixCtx suc = Ctx { onSuccess = fixpoint True, onFailure = if suc then onSuccess else onFailure, onRecurse = onRecurse }
+    fixCtx suc = Ctx { onSuccess = trace "sucFix" . fixpoint True, onFailure = if suc then onSuccess else onFailure, onRecurse = onRecurse }
     fixpoint :: Data a => Bool -> a -> m a
     fixpoint suc = withCtx f (fixCtx suc)
   in fixpoint False a0

@@ -16,7 +16,6 @@ import qualified Data.Map.Strict as M
 import OpenRec
 import Data.Functor.Identity
 import Data.Semigroup (Max(..))
-import Data.Monoid (First(..))
 import Data.Foldable (asum)
 import Data.Coerce (Coercible, coerce)
 import Control.Monad.Reader (MonadReader, ReaderT)
@@ -122,36 +121,49 @@ bindGuardT :: Lang -> Maybe Lang
 bindGuardT (Bind (Filter g (Return Unit)) _ e ) = Just (Filter g e)
 bindGuardT _ = Nothing
 
-bindBindT :: Lang' t -> Maybe (Lang' t)
-bindBindT (Bind (Bind e1 v e2) v' e3) = Just (Bind e1 v (Bind e2 v' e3))
-bindBindT _ = Nothing
+bindBindT :: Functor m => Trans1 m -> Lang -> Maybe (m Lang)
+bindBindT rec (Bind (Bind e1 v e2) v' e3) = Just $ Bind e1 v <$> rec (Bind e2 v' e3)
+bindBindT _ _ = Nothing
 
 bindUnitT :: Lang' t -> Maybe (Lang' t)
 bindUnitT (Bind (Return Unit) _ e) = Just e
 bindUnitT _ = Nothing
 
+callThunk :: Lang' t -> Maybe (Lang' t)
+callThunk (OpLang (Call (AThunk thunk))) = Just (OpLang $ Force thunk)
+callThunk _ = Nothing
+
 bindRightUnitT :: Lang' t -> Maybe (Lang' t)
 bindRightUnitT (Bind m v (Return (Ref v'))) | v == v' = Just m
 bindRightUnitT _ = Nothing
 
-bindLeftUnitT :: Lang -> Maybe Lang
-bindLeftUnitT (Bind (Return a) v e) = Just (subst v a e)
-bindLeftUnitT _ = Nothing
+bindLeftUnitT :: Functor m => Trans1 m -> Lang -> Maybe (m Lang)
+bindLeftUnitT rec (Bind (Return a) v e) = Just (rec $ subst v a e)
+bindLeftUnitT _ _ = Nothing
 
 trivialThunk :: Expr -> Maybe Expr
 trivialThunk (AThunk (Thunk (Source s) [])) = Just (Ref s)
 trivialThunk _ = Nothing
 
+hoistFilter :: Lang' t -> Maybe (Lang' t)
+hoistFilter (Bind (Filter g e) v e') = Just (Filter g (Bind e v e'))
+hoistFilter _ = Nothing
+
 trivPack :: Expr -> Maybe Expr
 trivPack (Pack [x]) = Just (Ref x)
 trivPack _ = Nothing
 
+projTuple :: Expr -> Maybe Expr
+projTuple (Proj i (Tuple ls)) = Just (ls !! i)
+projTuple _ = Nothing
+
+
 simpPass :: Data a => a -> a
 simpPass = runIdentity . runT (
-   recurse >>> completelyTrans' (langRewrites ||| exprRewrites))
+   recurse >>> (langRewrites ||| exprRewrites))
   where
-   langRewrites = tryTrans $ useFirst [bindGuardT, bindBindT, bindUnitT, bindRightUnitT, bindLeftUnitT]
-   exprRewrites = tryTrans trivPack
+   langRewrites = tryTrans (useFirst [bindGuardT, bindUnitT, bindRightUnitT, callThunk, hoistFilter]) ||| tryTransM bindLeftUnitT ||| tryTransM bindBindT
+   exprRewrites = tryTrans $ useFirst [ trivPack, projTuple ]
    useFirst = ala First mconcat
 
 
