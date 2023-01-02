@@ -24,7 +24,8 @@ import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
 import Data.Foldable (foldl')
 import Data.Functor.Identity (Identity (runIdentity))
-import Debug.Trace (traceM)
+import Debug.Trace (traceM, trace)
+import Data.Containers.ListUtils (nubOrd)
 
 
 
@@ -32,7 +33,7 @@ data CTEnv = CTEnv {
     nameGen :: Int,
     locals :: S.Set Var,
     generatedBindings :: M.Map Source Lang,
-    generatedRequests :: [(Source, [Local], Source, Maybe AggrOp)],
+    generatedRequests :: [(Source, [Expr], Source, Maybe AggrOp)],
     lastLabel :: Source,
     firstLabel :: Maybe Source
 }
@@ -48,21 +49,23 @@ doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (gene
     collectFree a = freeVarsQ a S.\\  S.fromList (map unSource $ M.keys $ defs tl)
 
     out = do
-      defs' <- forM (M.toList $ defs tl) $ \(k, (_args, e)) -> do
+      forM_ (M.toList $ defs tl) $ \(k, (_args, e)) -> do
         modify $ \s -> s { firstLabel = Nothing, lastLabel = k }
         e <- runT (coroutineTransform collectFree) e
         ll <- gets lastLabel
-        modify $ \s -> s { generatedBindings = renameEntry ll k (generatedBindings s) }
         fl <- gets firstLabel
-        pure (fromMaybe k fl, (_args, e))
-      pure $ tl { defs = M.fromList defs' }
+        case fl of
+          Nothing -> pure ()
+          Just fl -> modify $ \s -> s { generatedBindings = M.insert fl e $ renameEntry ll k (generatedBindings s) }
+        pure  ()
+      pure tl
 
     sources = M.fromListWith (<>) [ (funTable, [(source, locals)]) | (funTable, locals, source, _) <- generatedRequests env' ]
     aggregates = M.fromListWith (<>) [ (funTable, [op]) | (funTable, _locals, _source, Just op) <- generatedRequests env' ]
     funs = runIdentity $ withVarGenT varGen' $ fmap (M.fromListWith (error "key collision") . concat) $ traverse (uncurry doFun) $ M.toList $ M.filter (not . null . fst) (defs tl)
     -- !_ = error (show sources)
     doFun k (args, body) = do
-       body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Pack args, x]) body)
+       body' <- loadInputs args (nubOrd inputs) (mapExpr (\x -> Tuple [Pack args, x]) body)
        let aggs = doAggregates k ops
        pure $ (k, ([], body')):aggs
       where
@@ -77,7 +80,7 @@ mapExpr f a = runIdentity $ traverseP (pure . mapExpr f) a
 doAggregates :: Source -> [AggrOp] -> [(Source, ([a], Lang))]
 doAggregates (Source (Var i s)) aggs = [ (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group agg (LRef $ Var i s))) | agg <- aggs ]
 
-loadInputs :: [Var] -> [(Source, [Local])] -> Lang -> VarGenT Identity Lang
+loadInputs :: [Var] -> [(Source, [Expr])] -> Lang -> VarGenT Identity Lang
 loadInputs _ [] body = pure body
 loadInputs locs inps body = do
    let sources =   foldl1 (\a b -> OpLang (Union a b)) (fmap (LRef . unSource . fst) inps)
@@ -93,7 +96,9 @@ renameEntry old new m = case m M.!? old of
 tellRequest :: Var -> (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
 tellRequest s (v, op, Thunk sym args) lan = do
     modify $ \env -> env { generatedRequests = (sourceToRequest sym, args, Source s, op) : generatedRequests env }
-    pure $ OpLang $ Lookup (Source $ sourceToOp op sym) args v lan
+    case op of
+      Nothing -> pure lan
+      Just _ -> pure $ OpLang $ Let v (Lookup (Source $ sourceToOp op sym) args) lan
 
 tellRequests :: Var -> [(Var, Maybe AggrOp, Thunk)] -> Lang -> M Lang
 tellRequests _ [] lan = pure lan
@@ -112,15 +117,14 @@ coroutineTransform freeVars = tryTransM (\rec -> \case
     w@(AsyncBind binds e :: Lang) -> Just $ do
       let frees = freeVars w
       stash <- genVar "stash"
-      -- old <- gets label
-      -- tempVar <- genVar "temp"
       out <- tellRequests stash binds =<< rec e
       bindVar <- genVar "l"
       outLabel <- genVar "out"
       let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (LRef bindVar) (S.toList frees) out)
+      let self = Return (Pack (S.toList frees))
       tellGenerated outLabel nested
       modify $ \s -> s { firstLabel = firstLabel s <|> Just (Source stash), lastLabel = Source outLabel }
-      pure (Return (Pack (S.toList frees)))
+      pure self
     _ -> Nothing)
     ||| recurse
 

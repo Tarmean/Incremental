@@ -16,63 +16,38 @@ import qualified Data.Map.Strict as M
 import OpenRec
 import Data.Functor.Identity
 import Data.Semigroup (Max(..))
-import Data.Foldable (asum)
 import Data.Coerce (Coercible, coerce)
 import Control.Monad.Reader (MonadReader, ReaderT)
-
--- recompExprType :: TypeEnv -> ScopeEnv -> Expr -> ExprType
--- recompExprType env scope (Ref v) = fromMaybe AnyType (scope LM.!? tyData v <|> tableTys env LM.!? tyData v)
--- recompExprType _env _scope (Proj _ i v) = case etyOf v of
---   TupleTyp ls -> ls !! i
---   _ -> error "Projection of non-tuple"
--- recompExprType _env _scope (BOp _ op _ _) = case op of
---     Eql -> EBase $ typeRep (Proxy :: Proxy Bool)
--- recompExprType _ _ _ = AnyType
-
--- recompLangType :: Lang' a -> ExprType
--- recompLangType = \case
---   Comprehend _ _ _ _ _ e -> etyOf e
---   Return e -> etyOf e
---   _ -> AnyType
-
--- recompTypes :: TopLevel -> TopLevel
--- recompTypes e0 =  outLevel
---   where
---      outLevel = runReader (runT t e0) LM.empty
---      out = TE (LM.fromList [ (unSource k, ltyOf v) | (k,(_args, v)) <- LM.toList (defs e0) ]) mempty
---      t =
---          trans (\rec -> \case
---            (w@Comprehend {cBound}::Lang) -> recompLang <$> local (M.union $ boundEnv cBound) (rec w)
---            w -> recompLang <$> rec w)
---         |||
---          trans (\rec a ->
---            recompExpr =<< rec a)
---         |||
---          recurse
---      boundEnv :: [(Var, Typed Var)] -> M.Map Var ExprType
---      boundEnv = M.fromList . map (second tyType)
---      recompLang e = setLangType e $ recompLangType e
---      recompExpr e = do
---         scope <- ask
---         pure $ setExprType e (recompExprType out scope e)
-
--- setLangType :: Lang' a -> ExprType -> Lang' a
--- setLangType l t = case l of
---   Comprehend {} -> l { eTyp = t }
---   Return e -> Return e
-
--- setExprType :: Expr -> ExprType -> Expr
--- setExprType expr t = case expr of
---   Ref v -> Ref v { tyType = t }
---   Proj _ i e -> Proj t i e
---   BOp _ op a b -> BOp t op a b
+import Data.Bifunctor (second, Bifunctor (bimap))
+import qualified Data.List as List
+import Data.Containers.ListUtils (nubOrd)
+import Debug.Trace (trace)
 
 
 tagWithFrees :: TopLevel -> TopLevel
 tagWithFrees tl = tl { defs = defs' }
   where
-    defs' = M.map (\(_args, e) -> (escaped e, e)) (defs tl)
-    escaped e = filter (\x -> Source x `M.notMember` defs tl) (S.toList $ freeVarsQ e)
+    defs' = M.mapWithKey (\k (_args, e) -> (S.toList $ snd (forDefs M.! unSource k), e)) (defs tl)
+
+    forDefs = fixTransitive forDefs0
+    forDefs0 :: M.Map Var (S.Set Var, S.Set Var)
+    forDefs0 = M.mapWithKey (\k (_args, e) -> escaped k e) $ M.mapKeysMonotonic unSource  (defs tl)
+    escaped k e =  second dropBound $ S.partition (\x -> Source x `M.member` defs tl) (freeVarsQ e) 
+      where
+       dropBound = (S.\\ M.findWithDefault mempty k bound)
+
+
+    bound = M.map (\(_args, e) -> execWriter $ runT (withBoundT (\a b -> tell a *> b) >>> recurse) e) (M.mapKeysMonotonic unSource  $ defs tl)
+
+    trans1 :: M.Map Var (S.Set Var, S.Set Var) -> M.Map Var (S.Set Var, S.Set Var)
+    trans1 m = M.mapWithKey (\k (a,b) -> (a, b <> (concatMapS argsFor a S.\\ boundBy k))) m
+      where
+        argsFor a = maybe mempty snd (m M.!? a)
+        boundBy k = M.findWithDefault mempty k bound
+        concatMapS f a = S.unions (S.map f a)
+    fixTransitive :: M.Map Var (S.Set Var, S.Set Var) -> M.Map Var (S.Set Var, S.Set Var)
+    fixTransitive m = if m == m' then m else fixTransitive m'
+      where m' = trans1 m
 
 nullTypes :: Data a => a -> a
 nullTypes = runIdentity .: runT $
@@ -154,7 +129,7 @@ trivPack (Pack [x]) = Just (Ref x)
 trivPack _ = Nothing
 
 projTuple :: Expr -> Maybe Expr
-projTuple (Proj i (Tuple ls)) = Just (ls !! i)
+projTuple (Proj i _ (Tuple ls)) = Just (ls !! i)
 projTuple _ = Nothing
 
 
@@ -163,7 +138,7 @@ simpPass = runIdentity . runT (
    recurse >>> (langRewrites ||| exprRewrites))
   where
    langRewrites = tryTrans (useFirst [bindGuardT, bindUnitT, bindRightUnitT, callThunk, hoistFilter]) ||| tryTransM bindLeftUnitT ||| tryTransM bindBindT
-   exprRewrites = tryTrans $ useFirst [ trivPack, projTuple ]
+   exprRewrites = tryTrans $ useFirst [ projTuple ]
    useFirst = ala First mconcat
 
 
@@ -187,22 +162,34 @@ subst v sub = runIdentity . runT (
     ||| recurse)
 
 nestedToThunks :: TopLevel -> TopLevel
-nestedToThunks tl0 = runIdentity $ runT (trans_ nestToThunk &&& trans_ dropDumbThunk &&& recurse) tl
+nestedToThunks tl0 =  tl
   where
-    tl = tagWithFrees tl0
-    nestToThunk :: Expr -> Identity Expr
-    nestToThunk (Nest (LRef r)) = pure $ AThunk (Thunk (Source r) (argsOf r))
-    nestToThunk (AggrNested op (LRef r)) = pure $ Aggr op (Thunk (Source r) (argsOf r))
-    nestToThunk a = pure a
-    dropDumbThunk :: Expr -> Identity Expr
-    dropDumbThunk (AThunk (Thunk (Source a) [])) = pure $ Ref a
-    dropDumbThunk a = pure a
-    argsOf :: Var -> [Var]
+    tl = tl0 { defs = M.map (second doTrans) $ defs $ tagWithFrees tl0 }
+    doTrans = runIdentity . runT (tryTrans_ nestToThunk ||| tryTrans_ nestToThunkL ||| tryTrans_ dropDumbThunk ||| recurse)
+
+    nestToThunk :: Expr -> Maybe Expr
+    nestToThunk (Nest (LRef r)) = Just $ AThunk (Thunk (Source r) (argsOf r))
+    nestToThunk (AggrNested op (LRef r)) = Just $ Aggr op (Thunk (Source r) (argsOf r))
+    nestToThunk _ = Nothing
+    nestToThunkL (LRef r::Lang) 
+      | Just args <- tryArgsOf r = Just $ OpLang (Force $ Thunk (Source r) (map Ref args))
+    nestToThunkL _ = Nothing
+    dropDumbThunk :: Expr -> Maybe Expr
+    dropDumbThunk (AThunk (Thunk (Source a) [])) = Just $ Ref a
+    dropDumbThunk _ = Nothing
+    argsOf :: Var -> [Expr]
     argsOf v = case LM.lookup (Source v) (defs tl) of
-      Just ([], _) -> error (show v <> " Did you forgot to run optPass before nestedToThunks?")
-      Just (args, _) -> args
+      Just ([], _) -> error (prettyS v <> " Did you forgot to run optPass before nestedToThunks?")
+      Just (args, _) -> map Ref args
       Nothing 
         | otherwise -> error ("Undefined function" <> show v)
+    tryArgsOf :: Var -> Maybe [Var]
+    tryArgsOf v = case LM.lookup (Source v) (defs tl) of
+      Just ([], _) -> Nothing
+      Just (args, _) -> Just args
+      Nothing 
+        | otherwise -> Nothing
+
 dropTopLevel :: TopLevel' p -> TopLevel' p
 dropTopLevel a = a { defs = M.map dropDefs (defs a) }
   where

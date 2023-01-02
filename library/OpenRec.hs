@@ -1,14 +1,17 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ExplicitNamespaces #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use const" #-}
 module OpenRec where
 
 import Data.Data hiding (gmapM)
-import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter)
+import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter, WriterT, execWriterT)
 import Control.Monad ((<=<))
 import Control.Monad.Identity (Identity(..))
 import Control.Applicative ((<|>))
 import Debug.Trace (trace)
+import Control.Monad.Trans (lift)
 -- import Control.Monad.Writer.Strict (WriterT, runWriterT, tell)
 
 (.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
@@ -34,6 +37,12 @@ runQ :: forall a o. (Monoid o, Data a) => Trans (Writer o) -> a -> o
 runQ (T a) x = execWriter (f x)
   where
     f :: Data x => x -> (Writer o) x
+    f = a (Ctx pure pure (gmapM f))
+
+runQT :: forall a o m. (Monad m, Monoid o, Data a) => Trans (WriterT o m) -> a -> m o
+runQT (T a) x = execWriterT (f x)
+  where
+    f :: Data x => x -> WriterT o m x
     f = a (Ctx pure pure (gmapM f))
 
 gmapM :: forall m a. (Data a, Applicative m) => (forall d. Data d => d -> m d) -> a -> m a
@@ -69,11 +78,23 @@ query :: forall a o. (Monoid o, Data a) => ((forall x. Data x => x -> o) -> a ->
 query f = T $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> a' <$ tell (f (execWriter . onRecurse) a')
   Nothing -> onFailure a'
+tryQueryM :: forall a o m. (Monad m, Monoid o, Data a) => ((forall x. Data x => x -> m o) -> a -> Maybe (m o)) -> Trans (WriterT o m)
+tryQueryM f = T $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
+  Just Refl -> case f (execWriterT . onRecurse . Identity) a' of
+      Nothing -> onFailure a'
+      Just o -> lift o >>= tell >> onSuccess a'
+  Nothing -> onFailure a'
 tryQuery :: forall a o. (Monoid o, Data a) => ((forall x. Data x => x -> o) -> a -> Maybe o) -> Trans (Writer o)
 tryQuery f = T $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> case f (execWriter . onRecurse . Identity) a' of
       Nothing -> onFailure a'
       Just o -> tell o >> onSuccess a'
+  Nothing -> onFailure a'
+tryQuery_ :: forall a o m. (Monad m, Monoid o, Data a) => (a -> Maybe o) -> Trans (WriterT o m)
+tryQuery_ f = T $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
+  Just Refl -> case f a' of
+      Nothing -> onFailure a'
+      Just o -> tell o *> onSuccess a'
   Nothing -> onFailure a'
 
 trans :: forall a m. (Monad m, Data a) => (Trans1 m -> a -> m a) -> Trans m
@@ -98,6 +119,10 @@ tryTransM f = T $ \Ctx{..} (a::a') -> case eqT @a @a' of
      Nothing -> onFailure a
      Just ma' -> onSuccess =<< ma'
   Nothing -> onFailure a
+tryTransM_ :: forall a m. (Monad m, Data a) => (a -> Maybe (m a)) -> Trans m
+tryTransM_ f = tryTransM (\_ -> f)
+tryTrans_ :: forall a m. (Monad m, Data a) => (a -> Maybe a) -> Trans m
+tryTrans_ f = tryTransM (\_ -> fmap pure . f)
 
 completelyTrans' :: forall m. (Monad m) => Trans m -> Trans m
 completelyTrans' f = T $ \Ctx{..} a0 -> 

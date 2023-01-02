@@ -1,10 +1,12 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE BlockArguments #-}
 module Analysis where
 
 
 import OpenRec
 import qualified Data.Map.Strict as M
+import qualified Data.Map as LM
 import CompileQuery
 import Data.Foldable (Foldable(foldl'))
 import Data.Data (Data)
@@ -14,6 +16,8 @@ import Data.Coerce (coerce)
 import qualified Data.Set as S
 import Data.Bifunctor (second)
 import Data.Functor.Identity (Identity(runIdentity))
+import Debug.Trace (trace)
+import Data.Maybe (fromMaybe)
 
 
 newtype MonoidMap k v = MonoidMap { unMonoidMap :: M.Map k v }
@@ -89,25 +93,38 @@ type Usages = M.Map Var Usage
 analyzeArity :: TopLevel -> MonoidMap Var Usage
 analyzeArity tl=  MonoidMap (M.insert (unSource $ root tl) Many $ recs M.! unSource (root tl))
   where
-    defUsage = M.mapKeys unSource (M.map theQ (defs tl))
-    recs = fixTransitive @_ @Usage $ coerce defUsage
-    theQ = runQ $
-      query (\rec -> \case
-        (Ref  v::Expr) -> MonoidMap (M.singleton v Once)
-        a -> rec a)
-     |||
-      tryQuery (\rec -> \case
-        (Lookup s args bound bod ::OpLang) -> 
-          let s' = unSource s
-              recBod = rec bod 
-              boundUsage = M.findWithDefault None bound (unMonoidMap recBod)
-          in Just $ recBod <> rec args <> MonoidMap (M.singleton s' (min Once boundUsage))
-        _ -> Nothing)
-     |||
-      query (\rec -> \case
-        (LRef v::Lang) -> MonoidMap (M.singleton v Once)
-        a -> rec a )
-     ||| recurse
+    defUsage = M.mapKeys unSource $ M.map calcUsage (defs tl)
+    -- if top-level definitions refer to each other, calculate ther fixpoint
+    recs = fixTransitive @_ @Usage (coerce defUsage)
+    -- calculate usage for a single definition
+    -- recurse` sums up the usage of each child term
+    calcUsage = runQ 
+     (   tryQuery_ \case
+          (Ref  v::Expr) -> Just (singleton v Once)
+          _ -> Nothing
+     ||| tryQuery_ \case
+          (LRef v::Lang) -> Just (singleton v Once)
+          _ -> Nothing
+     ||| tryQuery (\rec -> \case
+          -- For `let v e in b`
+          -- If `v` doesn't occur in `b`, we can skip visiting `e`.
+          -- Later, it will be dropped anyway out.
+          (Let v e body::OpLang) -> 
+            let body' = rec body
+            in case lookupMult v body' of
+              None -> Just body'
+              _ -> Just (body' <> rec e)
+          _ -> Nothing)
+     ||| recurse)
+
+singleton :: k -> v -> MonoidMap k v
+singleton k v = MonoidMap (M.singleton k v)
+
+lookupMult :: (Monoid v, Ord k) => k -> MonoidMap k v -> v
+lookupMult k (MonoidMap m) = M.findWithDefault mempty k m
+(\\) :: Ord k => MonoidMap k v -> k -> MonoidMap k v
+(\\) (MonoidMap m) v = MonoidMap $ M.delete v m
+
 avoidInline :: Data a => a -> S.Set Var
 avoidInline = runQ $ 
    tryQuery (\_rec -> \case
@@ -121,16 +138,17 @@ m !!! k = case M.lookup k m of
   Just o -> o
 
 
-simpleBind :: Lang -> Bool
-simpleBind (Return _) = True
-simpleBind (OpLang (Opaque _)) = True
-simpleBind (Bind _ b (Return c))
-  | Ref b == c = True
-simpleBind _ = False
 
--- simpleBinds :: TopLevel -> [Source]
-simpleBinds :: M.Map b Lang -> M.Map b Lang 
-simpleBinds = M.filter simpleBind
+simpleBinds :: M.Map Source Lang -> M.Map Source Lang 
+simpleBinds env = M.filterWithKey (\k _ ->  simples M.! k) env
+  where
+    simples = LM.mapWithKey isSimple env
+    envCount = LM.map (outMultiplicity envCount) env
+    isSimple _ (OpLang Opaque{}) = True
+    isSimple k (OpLang (HasType _ s _)) = isSimple k s
+    isSimple _ (LRef k) = simples LM.! Source k
+    isSimple k _ = M.findWithDefault Many k envCount == Once
+    
 
 withArity :: Usage -> MonoidMap Var Usage -> [Var]
 withArity us (MonoidMap m) = map fst . filter ((==us) . snd) $ M.toList m
@@ -142,12 +160,6 @@ dropUseless arities tl = tl {
  }
   where
     useless = S.fromList $ withArity None arities
-
-localsFor :: [(Var, Typed Var)] -> Var -> [Var]
-localsFor binds v 
-  | null out = [] -- error ("No locals for " ++ show v ++ " in " ++ show binds)
-  | otherwise = out
-  where out = [localN | (localN,globalN) <- binds, tyData globalN == v]
 
 inlineComp :: Lang -> Var -> Lang -> Lang
 inlineComp a _ _ = a
@@ -176,36 +188,52 @@ mergeTyp :: p1 -> p2 -> p1
 mergeTyp a _ = a
 
 
-inlineLang :: M.Map Var Lang -> Lang -> Lang
-inlineLang m = runIdentity .: runT $
+inlineLang :: S.Set Var -> M.Map Var Lang -> Lang -> Lang
+inlineLang toInline m = runIdentity .: runT $
   trans @Lang (\rec -> \case
     LRef v
-      | Just o <- m M.!? v -> pure o
+      | S.member v toInline -> pure (fromMaybe (error "Missing def") (m M.!? v))
     a -> rec (a::Lang))
   ||| recurse
 
 
 doInlines :: MonoidMap Var Usage -> TopLevel -> TopLevel
 doInlines arities tl = tl {
-    defs = M.filterWithKey (\k _ -> unSource k `M.notMember` inlines) defs'
-    -- funs = M.map (inlineLang inlines) (funs tl)
+    defs = M.filterWithKey (\k _ -> unSource k `S.notMember` inlines) defs'
  }
   where
-    defs' = M.map (second (inlineLang inlines)) (defs tl)
+    defs' = M.map (second (inlineLang inlines (M.mapKeysMonotonic unSource $ M.map snd defs'))) (defs tl)
     inlines = gatherInlines tl arities defs'
-gatherInlines :: TopLevel -> MonoidMap Var Usage -> M.Map Source ([Var], Lang) -> M.Map Var Lang
-gatherInlines tl arities theDefs = M.union simples inlines
+gatherInlines :: TopLevel -> MonoidMap Var Usage -> M.Map Source ([Var], Lang) -> S.Set Var
+gatherInlines tl arities theDefs = S.union simples inlines
   where
     toInline = withArity Once arities
     avoids = avoidInline (defs tl)
-    inlines = M.fromList [ (v, def) | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v], inlinable def]
-    simples = simpleBinds (M.map snd $ M.mapKeysMonotonic unSource $ defs tl)
+    inlines = S.fromList [ v | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v], inlinable def]
+    simples = S.fromList $ map unSource $ M.keys $ simpleBinds (M.map snd $  defs tl)
 
 inlinable :: Lang -> Bool
 -- inlinable (Comprehend {}) = True
 -- inlinable (Return {}) = True
 inlinable (OpLang Group{}) = False
 inlinable _ = True
+
+-- | Count how many results are produced by a query
+outMultiplicity :: M.Map Source Usage -> Lang -> Usage
+outMultiplicity _ (Return _) = Once
+outMultiplicity env (Bind l _ b) = outMultiplicity env l .* outMultiplicity env b
+outMultiplicity env (Filter _ f) = outMultiplicity env f
+outMultiplicity env (LRef f) = M.findWithDefault Many (Source f) env
+outMultiplicity env (AsyncBind _ a) = outMultiplicity env a
+outMultiplicity env (OpLang l) = case l of
+  Opaque _ -> Many
+  Union a b -> outMultiplicity env a <> outMultiplicity env b
+  Unpack _ _ b -> outMultiplicity env b
+  Let _ _ b -> outMultiplicity env b
+  Group _ _ -> Once
+  Call _ -> Once
+  Force (Thunk t _) -> M.findWithDefault Many t env
+  HasType _ t _ -> outMultiplicity env t
 
 
 optPass :: TopLevel -> TopLevel

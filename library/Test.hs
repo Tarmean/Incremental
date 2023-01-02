@@ -11,7 +11,7 @@ import Data.Functor.Identity (Identity(..))
 
 
 table :: String -> [ExprType] -> RecLang
-table s tys = OpLang (HasType (OpLang (Opaque s)) (ListTy $ TupleTyp tys))
+table s tys = OpLang (HasType Given (OpLang (Opaque s)) (ListTy $ TupleTyp tys))
 
 userTable :: RecLang
 userTable = table "user" [intTy]
@@ -36,8 +36,9 @@ testRetNested = sec
             M.return b])
     sec = M.do
         m <- first
-        b <- OpLang $ Union (iter (Proj 1 m)) (iter (Proj 1 m))
-        M.return (Tuple [Proj 0 m, b])
+        n <- first
+        b <- OpLang $ Union (iter (Proj 1 2 m)) (iter (Proj 1 2 n))
+        M.return (Tuple [Proj 0 2 m, b])
    
 testFlat :: RecLang
 testFlat = M.do
@@ -61,7 +62,7 @@ testRightNest = M.do
     b = AggrNested SumT $ M.do
        f <- fooTable
        guards (a .== f)
-       M.pure (Proj 0 f)
+       M.pure (Proj 0 2 f)
    M.pure (Tuple [a, b])
 guards :: Expr' 'Rec -> RecLang
 guards e = Filter e (Return Unit)
