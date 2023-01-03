@@ -11,7 +11,7 @@ import Data.Functor.Identity (Identity(..))
 
 
 table :: String -> [ExprType] -> RecLang
-table s tys = OpLang (HasType Given (OpLang (Opaque s)) (ListTy $ TupleTyp tys))
+table s tys = OpLang (HasType Given (OpLang (Opaque s)) (ListTy RootTy $ TupleTyp tys))
 
 userTable :: RecLang
 userTable = table "user" [intTy]

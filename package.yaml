@@ -30,6 +30,8 @@ library:
   - syb
   - prettyprinter
   - QuickCheck
+  - unordered-containers
+  - lens
   source-dirs: library
 
 executables:

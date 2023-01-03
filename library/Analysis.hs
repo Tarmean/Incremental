@@ -190,10 +190,10 @@ mergeTyp a _ = a
 
 inlineLang :: S.Set Var -> M.Map Var Lang -> Lang -> Lang
 inlineLang toInline m = runIdentity .: runT $
-  trans @Lang (\rec -> \case
+  tryTrans_ @Lang (\case
     LRef v
-      | S.member v toInline -> pure (fromMaybe (error "Missing def") (m M.!? v))
-    a -> rec (a::Lang))
+      | S.member v toInline -> Just $ fromMaybe (error "Missing def") (m M.!? v)
+    _ -> Nothing)
   ||| recurse
 
 

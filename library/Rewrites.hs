@@ -18,10 +18,7 @@ import Data.Functor.Identity
 import Data.Semigroup (Max(..))
 import Data.Coerce (Coercible, coerce)
 import Control.Monad.Reader (MonadReader, ReaderT)
-import Data.Bifunctor (second, Bifunctor (bimap))
-import qualified Data.List as List
-import Data.Containers.ListUtils (nubOrd)
-import Debug.Trace (trace)
+import Data.Bifunctor (second)
 
 
 tagWithFrees :: TopLevel -> TopLevel
@@ -48,10 +45,6 @@ tagWithFrees tl = tl { defs = defs' }
     fixTransitive :: M.Map Var (S.Set Var, S.Set Var) -> M.Map Var (S.Set Var, S.Set Var)
     fixTransitive m = if m == m' then m else fixTransitive m'
       where m' = trans1 m
-
-nullTypes :: Data a => a -> a
-nullTypes = runIdentity .: runT $
-   trans_ (\(_ :: ExprType) -> pure (error "Nulled Type")) ||| recurse
 
 
 newtype VarGenT m a = VarGenT { runVarGenT :: StateT Int m a }
@@ -80,14 +73,15 @@ withVarGenT' i = flip runStateT i . runVarGenT
 
 
 type LiftFuns m = StateT (M.Map Fun ([Local], Lang)) (VarGenT m)
+
 maxVar :: Data a => a -> Int
 maxVar = getMax . runQ (
-     query (\rec -> \case
-       LRef @'Flat v -> Max (uniq v)
-       a -> rec a)
- ||| query (\rec -> \case
-       Ref @'Flat v -> Max (uniq v)
-       a -> rec a)
+     tryQuery_ (\case
+       LRef @'Flat v -> Just $ Max (uniq v)
+       _ -> Nothing)
+ ||| tryQuery_ (\case
+       Ref @'Flat v -> Just $ Max (uniq v)
+       a -> Nothing)
  ||| recurse)
 
 
@@ -172,15 +166,15 @@ nestedToThunks tl0 =  tl
     nestToThunk (AggrNested op (LRef r)) = Just $ Aggr op (Thunk (Source r) (argsOf r))
     nestToThunk _ = Nothing
     nestToThunkL (LRef r::Lang) 
-      | Just args <- tryArgsOf r = Just $ OpLang (Force $ Thunk (Source r) (map Ref args))
+      | Just args <- tryArgsOf r = Just $ OpLang (Force $ Thunk (Source r) args)
     nestToThunkL _ = Nothing
     dropDumbThunk :: Expr -> Maybe Expr
     dropDumbThunk (AThunk (Thunk (Source a) [])) = Just $ Ref a
     dropDumbThunk _ = Nothing
-    argsOf :: Var -> [Expr]
+    argsOf :: Var -> [Var]
     argsOf v = case LM.lookup (Source v) (defs tl) of
       Just ([], _) -> error (prettyS v <> " Did you forgot to run optPass before nestedToThunks?")
-      Just (args, _) -> map Ref args
+      Just (args, _) -> args
       Nothing 
         | otherwise -> error ("Undefined function" <> show v)
     tryArgsOf :: Var -> Maybe [Var]

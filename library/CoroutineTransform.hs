@@ -78,12 +78,14 @@ mapExpr f (Bind a v b) = Bind a v (mapExpr f b)
 mapExpr f a = runIdentity $ traverseP (pure . mapExpr f) a
 
 doAggregates :: Source -> [AggrOp] -> [(Source, ([a], Lang))]
-doAggregates (Source (Var i s)) aggs = [ (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group agg (LRef $ Var i s))) | agg <- aggs ]
+doAggregates (Source (Var i s)) aggs = [
+    (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group agg (LRef $ Var i s))) | agg <- aggs
+  ]
 
 loadInputs :: [Var] -> [(Source, [Expr])] -> Lang -> VarGenT Identity Lang
 loadInputs _ [] body = pure body
 loadInputs locs inps body = do
-   let sources =   foldl1 (\a b -> OpLang (Union a b)) (fmap (LRef . unSource . fst) inps)
+   let sources = foldl1 (\a b -> OpLang (Union a b)) (nubOrd $ fmap (LRef . unSource . fst) inps)
    l <- genVar "l"
    pure $ Bind  sources l (OpLang $ Unpack (LRef l) locs body)
 
@@ -95,10 +97,10 @@ renameEntry old new m = case m M.!? old of
 
 tellRequest :: Var -> (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
 tellRequest s (v, op, Thunk sym args) lan = do
-    modify $ \env -> env { generatedRequests = (sourceToRequest sym, args, Source s, op) : generatedRequests env }
+    modify $ \env -> env { generatedRequests = (sourceToRequest sym, map Ref args, Source s, op) : generatedRequests env }
     case op of
       Nothing -> pure lan
-      Just _ -> pure $ OpLang $ Let v (Lookup (Source $ sourceToOp op sym) args) lan
+      Just _ -> pure $ OpLang $ Let v (Lookup (Source $ sourceToOp op sym) (map Ref args)) lan
 
 tellRequests :: Var -> [(Var, Maybe AggrOp, Thunk)] -> Lang -> M Lang
 tellRequests _ [] lan = pure lan

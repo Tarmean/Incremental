@@ -11,7 +11,7 @@ import Elaborator (elaborate)
 
 -- runTest :: RecLang -> TopLevel
 runTest :: RecLang -> TopLevel
-runTest =  elaborate . nestedToThunks . optPass . toTopLevel
+runTest =  doCoroutineTransform . doLifting . simpPass . elaborate . nestedToThunks . optPass . toTopLevel
 -- runTest = simpPass . nestedToThunks . optPass . toTopLevel
 
 -- | An example function.

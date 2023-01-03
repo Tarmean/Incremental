@@ -24,6 +24,7 @@ import GHC.Stack.Types (HasCallStack)
 import OpenRec
 import Control.Monad.Writer.Strict (WriterT)
 import Control.Applicative
+import Data.List (intercalate, intersperse)
 
 
 
@@ -69,7 +70,7 @@ class TraverseP f where
 -- Only when we consume the container do we need to evaluate the thunk, which (mostly) absolves us from ever representing nested data.
 --
 -- Of course sharing could get lost if we just re-compute this data, so as a seconds tep we do memoization using a coroutine transformation.
-data Thunk = Thunk { atSource :: Source, atArgs :: [Expr] }
+data Thunk = Thunk { atSource :: Source, atArgs :: [Var] }
   deriving (Eq, Ord, Show, Data)
 
 (</>) :: Doc s -> Doc s -> Doc s
@@ -120,7 +121,7 @@ instance TraverseP Expr'  where
 data AggrOp = SumT | MinT | MaxT
   deriving (Eq, Ord, Show, Data)
 type Expr = Expr' 'Flat
-data ExprType = EBase TypeRep | TupleTyp [ExprType] | ThunkTy [Fun] ExprType | ListTy ExprType | UnificationVar Int
+data ExprType = TupleTyp [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep
   deriving (Eq, Ord, Show, Typeable)
 intTy :: ExprType
 intTy = EBase (typeRep (Proxy :: Proxy Int))
@@ -128,36 +129,43 @@ intTy = EBase (typeRep (Proxy :: Proxy Int))
 instance Data ExprType where
     gfoldl _ z a@EBase {} = z a
     gfoldl k z (TupleTyp ls)       = z TupleTyp `k` ls
-    gfoldl k z (ThunkTy fs t) = z ThunkTy `k` fs `k` t
-    gfoldl k z (ListTy v) = z ListTy `k` v
+    gfoldl k z (ListTy t v) = z ListTy `k` t `k` v
     gfoldl k z (UnificationVar v) = z UnificationVar `k` v
+    gfoldl k z (SourceTy v) = z SourceTy `k` v
+    gfoldl _ z RootTy = z RootTy
+    gfoldl _ z LocalTy = z LocalTy
 
     gunfold k z c
       = case constrIndex c of
-        5 -> k (z UnificationVar)
-        4 -> k (z ListTy)
-        3 -> k (k (z ThunkTy))
-        2 -> k (z TupleTyp)
-        1 -> k (z ListTy)
-        _ -> error "illegal constructor index"
+        6 -> z LocalTy
+        5 -> z RootTy
+        4 -> k (z SourceTy)
+        3 -> k (z UnificationVar)
+        2 -> k (k (z ListTy))
+        1 -> k (z TupleTyp)
+        i -> error ("illegal constructor index in expr" <> show i)
 
     toConstr EBase {} = eBaseConstr
     toConstr ListTy {} = eListTypeConstr
     toConstr TupleTyp {} = eTupleConstr
-    toConstr ThunkTy {} = thunkConstr
     toConstr UnificationVar {} = eUnificationVarConstr
+    toConstr SourceTy {} = eSourceTyConstr
+    toConstr RootTy {} = eRootTyConstr
+    toConstr LocalTy {} = eLocalTyConstr
 
     dataTypeOf _ = exprTypeDataType
 
-eBaseConstr, eListTypeConstr, eTupleConstr, thunkConstr :: Constr
+eSourceTyConstr :: Constr
+eBaseConstr, eListTypeConstr, eTupleConstr, eRootTyConstr, eLocalTyConstr, eUnificationVarConstr :: Constr
 eBaseConstr = mkConstr exprTypeDataType "EBase" [] Prefix
 eListTypeConstr = mkConstr exprTypeDataType "AnyType" [] Prefix
-eUnificationVarConstr :: Constr
 eUnificationVarConstr = mkConstr exprTypeDataType "UnificationVar" [] Prefix
 eTupleConstr = mkConstr exprTypeDataType "Tuple" [] Prefix
-thunkConstr = mkConstr exprTypeDataType "Thunk" [] Prefix
+eSourceTyConstr = mkConstr exprTypeDataType "SourceTy" [] Prefix
+eRootTyConstr = mkConstr exprTypeDataType "RootTy" [] Prefix
+eLocalTyConstr = mkConstr exprTypeDataType "LocalTy" [] Prefix
 exprTypeDataType :: DataType
-exprTypeDataType = mkDataType "ExprType" [eBaseConstr, eTupleConstr, thunkConstr]
+exprTypeDataType = mkDataType "ExprType" [eTupleConstr, eListTypeConstr, eUnificationVarConstr, eSourceTyConstr, eRootTyConstr, eLocalTyConstr]
 
 newtype Uniq = Uniq Int
   deriving (Eq, Show, Ord, Data)
@@ -190,7 +198,7 @@ instance Data Lang where
         4 -> k (z OpLang)
         5 -> k (z LRef)
         6 -> k (k (z AsyncBind))
-        _ -> error "illegal constructor index"
+        i -> error ("illegal constructor index in lang" <> show i)
     toConstr (Bind {}) = bindConstr
     toConstr (Filter {}) = filterConstr
     toConstr (Return {}) = returnConstr
@@ -207,7 +215,7 @@ lRefConstr = mkConstr langDataType "LRef" [] Prefix
 fBindConstr = mkConstr langDataType "FBind" [] Prefix
 asyncBindConstr = mkConstr langDataType "AsyncBind" [] Prefix
 langDataType :: DataType
-langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, fBindConstr, asyncBindConstr]
+langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, asyncBindConstr]
 
     
 instance TraverseP Lang' where
@@ -229,6 +237,7 @@ data OpLang' (t::Phase)
   | Call { nestedCall :: Expr' t }
   | Force { thunked :: Thunk }
   | HasType { rigidity :: TypeStrictness, langType :: Lang' t, hasTypeType :: ExprType }
+  | Distinct (Lang' t)
 type OpLang = OpLang' 'Flat
 deriving instance Eq OpLang
 deriving instance Ord OpLang
@@ -242,6 +251,7 @@ instance TraverseP OpLang' where
     traverseP f (Group a c) = Group a <$> f c
     traverseP f (HasType r a b) = HasType r <$> f a <*> pure b
     traverseP f (Call b) = Call <$> traverseP f b
+    traverseP f (Distinct b) = Distinct <$> traverseP f b
     traverseP _ (Force b) = pure $ Force b
 type Lang = Lang' 'Flat
 type RecLang = Lang' 'Rec
@@ -279,9 +289,12 @@ instance Pretty ExprType where
     pretty (EBase t) = pretty (show t)
     pretty (TupleTyp [a]) = "(" <> pretty a <> ",)"
     pretty (TupleTyp ts) = parens (hsep (punctuate comma (map pretty ts)))
-    pretty (ThunkTy fs t) = parens (hsep (punctuate comma (map pretty fs)) <+> "->" <+> pretty t)
-    pretty (ListTy l) = brackets (pretty l)
+    pretty (ListTy RootTy l) = brackets (pretty l)
+    pretty (ListTy t l) = brackets (pretty l) <> "@" <> pretty t
+    pretty (SourceTy o) = pretty o
     pretty (UnificationVar uv) = "UV<" <> pretty uv <> ">"
+    pretty RootTy = "RootTy"
+    pretty LocalTy = "<HigherOrder>"
 instance Pretty BOp where
     pretty Eql = "=="
 instance Pretty AggrOp where
@@ -307,25 +320,27 @@ instance Pretty Lang where
     pretty (Bind a b c) = group $ nest 2 $ "for" <+> pretty b <+> "in" <+> align (pretty a) <+> "{" <> nest 2 (line <> pretty c) </> "}"
     pretty (LRef v) = "*" <> pretty v
     pretty (Filter p c) = "when" <+> parens (pretty p) <+> pretty c
-    pretty (AsyncBind lets bod) = group $ ("async" <+> align (encloseSep open close sep [maybe "" (\x -> pretty x <> " ") op <> pretty k <+> "=" <+> pretty v | (k,op, v) <- lets])) </> "in" <+> pretty bod
+    pretty (AsyncBind lets bod) = group $ ("async" <+> align (startEndSep open close sep [maybe "" (\x -> pretty x <> " ") op <> pretty k <+> "=" <+> pretty v | (k,op, v) <- lets])) </> pretty bod
       where
-        open = flatAlt "" "{ "
-        close = flatAlt "" " }"
-        sep = flatAlt "" "; "
+        open = flatAlt "{ " "{ "
+        close = flatAlt "}" "}"
+        sep = flatAlt "; " "; "
+        startEndSep a b c ls =  group $ a <> hcat (intersperse (line' <> c) ls) </> b
     pretty (Return e) = "yield" <+> pretty e
     pretty (OpLang o) = pretty o
 instance Pretty OpLang where
     pretty (Opaque s) = "#" <> pretty s
-    pretty (Union a b) = "Union" <+> pretty a <+> pretty b
+    pretty (Union a b) = "Union" <+> group (align (pretty a </> pretty b))
     pretty (Unpack a v c) = group $ "let"<+> align (align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) </> "in" <+> pretty c
-    pretty (Let v e b) = group $ pretty v <+> ":=" <+> pretty e </> "in" <+> pretty b
+    pretty (Let v e b) = group $ "let" <+> pretty v <+> ":=" <+> pretty e </> pretty b
     pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
     pretty (HasType Inferred e t) = parens $ pretty e <+> "::" <+> pretty t
     pretty (HasType _ e t) = pretty e <+> "::" <+> pretty t
     pretty (Call e) = "?" <> pretty e
     pretty (Force t) = "!" <> pretty t
+    pretty (Distinct t) = "Distinct" <+> pretty t
 instance Pretty a => Pretty (TopLevel' a) where
-    pretty (TopLevel ds root) = "let " <> align (vsep (prettyAssignments ds)) </> "in " <> pretty root
+    pretty (TopLevel ds root) = "let " <> align (vsep (prettyAssignments ds)) </> "in " </> pretty root
       where
 
         prettyAssignments m = [pretty k <> prettyVars vars <+> "=" <+>  pretty v | (k, (vars,v)) <- M.toList m]
@@ -422,7 +437,7 @@ freeVarsQT =
  ||| tryQueryM @OpLang (\rec -> \case
        (Unpack exp v body) -> Just (rec exp <>* fmap (S.\\ S.fromList v) (rec body))
        _ -> Nothing)
- ||| tryQueryM @Thunk (\rec (Thunk (Source v) ls) -> Just (pure (S.singleton v) <>* rec ls))
+ ||| tryQuery_ @Thunk (\(Thunk (Source v) ls) -> Just (S.insert v (S.fromList ls)))
  ||| recurse
  where
    boundVars bound = S.fromList [v|(v,_,_) <-  bound]

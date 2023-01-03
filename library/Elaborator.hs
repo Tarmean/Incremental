@@ -42,19 +42,22 @@ elaborate tl = tl { defs = defs' }
         freshVars (map unSource topVars) $ \bound -> do
             ls <- traverse (overSecond elabLang) $ M.toList $ defs tl
             topTys <- traverse (setUVars . lTy . snd . snd) ls
+            -- traceM $ show (zipWith addListTy (map fst ls) topTys)
             let topBound = zip bound topTys
-            -- traceM $ "topBound: " ++ prettyS topBound
-            -- traceM $ "env: " ++ prettyS (M.toList env)
-            traverse_ (uncurry unify) topBound
-            -- env <- traverse (overSecond setUVars) . M.toList =<< gets uEnv
-            -- traceM $ "env': " ++ prettyS env
+            traverse_ (uncurry unify) topBound 
+            let topBound = zip bound (zipWith addListTy ls topTys)
+            traverse_ (uncurry unify) topBound 
             pure ls
     topLevel = mempty
 
+addListTy :: (Source, ([Var], Lang)) -> ExprType -> ExprType
+addListTy (s, ([],_)) (ListTy _ t) = ListTy RootTy t
+addListTy (s, (_:_,_)) (ListTy _ t) = ListTy (SourceTy s) t
+addListTy _ t =error ""
+
 fillUVars :: ExprType -> M ExprType
 fillUVars (TupleTyp t) = TupleTyp <$> traverse fillUVars t
-fillUVars (ListTy t) = ListTy <$> fillUVars t
-fillUVars (ThunkTy t arg) = ThunkTy t <$> fillUVars arg
+fillUVars (ListTy k t) = ListTy <$> fillUVars k <*> fillUVars t
 fillUVars (UnificationVar v) = do
     env <- gets uEnv
     case M.lookup v env of
@@ -96,8 +99,8 @@ lTy l = error ("lTy: not a HasEType\n" <> prettyS l)
 -- Rewrite it into a normal form with an HasEType on top
 tcThunk :: Thunk -> M ExprType
 tcThunk (Thunk sym _) = do
-   thunkOut <- lookupVar (unSource sym)
-   pure (ListTy thunkOut)
+   lookupVar (unSource sym)
+   -- pure thunkOut
 tcExpr :: Expr -> M Expr
 tcExpr e@(HasEType {}) = pure e
 tcExpr (Ref r) = setEType (Ref r) <$> lookupVar r
@@ -110,7 +113,7 @@ tcExpr (Proj i tot e) = do
       TupleTyp tys -> pure $ setEType (Proj i tot e') (tys !! i)
       uv@UnificationVar {} -> do
          v <- replicateM tot freshUVar
-         unify uv (TupleTyp v)
+         _ <- unify uv (TupleTyp v)
          pure $ setEType (Proj i tot e) (v !! i)
       _ -> throwError ("tcExpr: Proj on non-record" <> show e)
 tcExpr Unit = pure $ setEType Unit (TupleTyp [])
@@ -122,7 +125,7 @@ tcExpr (BOp op a b) = do
   b' <- tcExpr b
   case op of
     Eql -> do
-        unify (nTy a') (nTy b') 
+        _ <- unify (nTy a') (nTy b') 
         pure $ setEType (BOp op a' b') (EBase (typeRep @Bool))
 tcExpr (Aggr op thunk) = do
   thunkTy <- tcThunk thunk
@@ -137,7 +140,8 @@ tcExpr (AggrNested op t) = do
   pure $ setEType (AggrNested op t) oTy
 tcExpr (Nest n) = do
   sourceTy <- tcLang n
-  pure $ setEType (Nest n) (ListTy (lTy sourceTy))
+  uv <- freshUVar
+  pure $ setEType (Nest n) (ListTy uv (lTy sourceTy))
 tcExpr l@(Lookup source _) = do
    sourceTy <- lookupVar (unSource source)
    pure $ hasEType l sourceTy
@@ -159,17 +163,19 @@ tcLang :: Lang -> M Lang
 tcLang (Bind generator v body) = do
    generator' <- tcLang generator
    ty <- case lTy generator' of
-     ListTy ty -> pure ty
+     ListTy _ ty -> pure ty
      ov@UnificationVar {} -> do
        v' <- freshUVar
-       unify ov (ListTy v')
+       uv <- freshUVar
+       _ <- unify ov (ListTy uv v')
        pure v'
      o -> throwError $ "tcLang: Bind on non-list: " <> prettyS o <> "\n" <> prettyS generator'
    body' <- local (M.insert v ty) (tcLang body)
    setType (Bind generator' v body') (lTy body')
 tcLang (Return expr) = do
    expr' <- tcExpr expr
-   setType (Return expr') (ListTy $ nTy expr')
+   uv <- freshUVar
+   setType (Return expr') (ListTy uv $ nTy expr')
 tcLang (Filter expr body) = do
    expr' <- tcExpr expr
    assert (nTy expr' == EBase (typeRep @Bool)) "tcLang: Filter on non-bool"
@@ -187,8 +193,8 @@ tcOpLang (Opaque s) = throwError ("Untyped opaque: " <> show s)
 tcOpLang (Union a b) = do
    a' <- tcLang a
    b' <- tcLang b
-   unify (lTy a') (lTy b')
-   pure $ HasType Inferred (OpLang $ Union a' b') (lTy a')
+   oTy <- unify (lTy a') (lTy b')
+   pure $ HasType Inferred (OpLang $ Union a' b') oTy
 tcOpLang (Unpack l vs body) = do
   l' <- tcLang l
   case lTy l' of
@@ -202,26 +208,43 @@ tcOpLang (Let v e body) = do
    pure $ HasType Inferred (OpLang $ Let v e' body') (lTy body')
 tcOpLang (Call e) = do
     e' <- tcExpr e
-    pure $ HasType Inferred (OpLang $ Call e') (nTy e')
+    ty' <- cleanSource (nTy e')
+    pure $ HasType Inferred (OpLang $ Call e') ty'
 tcOpLang w@(Force (Thunk sym _args)) = do
     symTy  <- lookupVar (unSource sym)
-    pure $ HasType Inferred (OpLang w) (ListTy symTy)
+    ty' <- cleanSource symTy
+    pure $ HasType Inferred (OpLang w) ty'
 tcOpLang (Group op body) = do
   body' <- tcLang body
   keyTy <- mapTyKey (lTy body')
   outTy <- checkOp op =<< mapTyVal (lTy body')
-  pure $ HasType Inferred (OpLang $ Group op body') (ListTy $ TupleTyp [keyTy, outTy])
+  uv <- freshUVar
+  pure $ HasType Inferred (OpLang $ Group op body') (ListTy uv $ TupleTyp [keyTy, outTy])
   where
     mapTyKey :: ExprType -> M ExprType
-    mapTyKey (ListTy (TupleTyp [a,_])) = pure a
+    mapTyKey (ListTy _ (TupleTyp [a,_])) = pure a
     mapTyKey ty = throwError ("mapTyVal: not a key-value pair: " <> show ty)
     mapTyVal :: ExprType -> M ExprType
-    mapTyVal (ListTy (TupleTyp [_,b])) = pure $ ListTy b
+    mapTyVal (ListTy k (TupleTyp [_,b])) = pure $ ListTy k b
     mapTyVal ty = throwError ("mapTyVal: not a key-value pair: " <> show ty)
+
+cleanSource :: ExprType -> M ExprType
+cleanSource (ListTy _ a) = do
+  pure $ ListTy LocalTy a
+cleanSource (UnificationVar v) = do
+      tty <- freshUVar
+      ety <- freshUVar
+      oty <- unify (UnificationVar v) (ListTy tty ety)
+      case oty of
+        ListTy _ a -> do
+          pure $ ListTy LocalTy a
+        _ -> error "cleanSource: impossible"
+cleanSource o = error ("cleanSource: not a list: " <> show o)
 
 checkOp :: AggrOp -> ExprType -> M ExprType
 checkOp op ty = do
-  unify (ListTy (inpTy op)) ty 
+  st <- freshUVar
+  _ <- unify (ListTy st (inpTy op)) ty 
   pure (outTy op)
   where
     inpTy _ = EBase (typeRep @Int)
@@ -232,19 +255,21 @@ zipStrict [] [] = []
 zipStrict (a:as) (b:bs) = (a, b) : zipStrict as bs
 zipStrict _ _ = error "zipStrict: lists of different length"
 
-unify :: HasCallStack => ExprType -> ExprType -> M ()
+unify :: HasCallStack => ExprType -> ExprType -> M ExprType
 -- unify a b | trace ("unify: " <> prettyS (a,b)) False = undefined
 unify (UnificationVar v) (UnificationVar v')
   | v > v' = unify (UnificationVar v') (UnificationVar v)
-  | v == v' = pure ()
+  | v == v' = pure (UnificationVar v)
 unify (UnificationVar v) r = do 
   uLookup v >>= \case
-    Nothing -> uInsert v r
+    Nothing -> r <$ uInsert v r
     Just l -> unify l r
 unify l (UnificationVar v) = unify (UnificationVar v) l
-unify (ListTy l) (ListTy r) = unify l r
-unify (TupleTyp l) (TupleTyp r) = zipStrict l r & traverse_ (uncurry unify)
-unify l r = unless (l == r) $ throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack)
+unify (ListTy k l) (ListTy k' r) = ListTy <$> unify k k' <*> unify l r
+unify (TupleTyp l) (TupleTyp r) = TupleTyp <$> (zipStrict l r & traverse (uncurry unify))
+unify l r 
+  | l == r = pure l
+  | otherwise = throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack)
 
 
 uLookup :: Int -> M (Maybe ExprType)
