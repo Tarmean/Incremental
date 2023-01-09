@@ -171,7 +171,7 @@ follower :: TypeRep -> HashSet TypeRep -> HitMap -> Follower
 follower a b m
   | S.null hit               = const False
   | S.null miss              = const True
-  | S.size hit < S.size miss = (`S.member` hit)
+  -- | S.size hit < S.size miss = (`S.member` hit)
   | otherwise = \k -> not (S.member k miss)
   where
     (hit, miss) = part (\x -> not $ S.null (S.intersection b (m ! x))) (S.insert a (m ! a))

@@ -33,7 +33,7 @@ data CTEnv = CTEnv {
     nameGen :: Int,
     locals :: S.Set Var,
     generatedBindings :: M.Map Source Lang,
-    generatedRequests :: [(Source, [Expr], Source, Maybe AggrOp)],
+    generatedRequests :: [(Source, [Var], Source, Maybe AggrOp)],
     lastLabel :: Source,
     firstLabel :: Maybe Source
 }
@@ -82,12 +82,18 @@ doAggregates (Source (Var i s)) aggs = [
     (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group agg (LRef $ Var i s))) | agg <- aggs
   ]
 
-loadInputs :: [Var] -> [(Source, [Expr])] -> Lang -> VarGenT Identity Lang
+loadInputs :: [Var] -> [(Source, [Var])] -> Lang -> VarGenT Identity Lang
 loadInputs _ [] body = pure body
 loadInputs locs inps body = do
-   let sources = foldl1 (\a b -> OpLang (Union a b)) (nubOrd $ fmap (LRef . unSource . fst) inps)
+   let
+     load1 (src, vars) = do
+        as <- genVar "p"
+        pure $ Bind (LRef $ unSource src) as (OpLang $ Unpack (LRef as) vars (Return $ Tuple (map Ref vars)))
+       
+   sources <- traverse load1 inps
+   let source = foldl1 (\a b -> OpLang (Union a b)) sources
    l <- genVar "l"
-   pure $ Bind  sources l (OpLang $ Unpack (LRef l) locs body)
+   pure $ Bind  source l (OpLang $ Unpack (LRef l) locs body)
 
 renameEntry :: Source -> Source -> M.Map Source Lang -> M.Map Source Lang
 renameEntry old new m = case m M.!? old of
@@ -97,7 +103,7 @@ renameEntry old new m = case m M.!? old of
 
 tellRequest :: Var -> (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
 tellRequest s (v, op, Thunk sym args) lan = do
-    modify $ \env -> env { generatedRequests = (sourceToRequest sym, map Ref args, Source s, op) : generatedRequests env }
+    modify $ \env -> env { generatedRequests = (sourceToRequest sym, args, Source s, op) : generatedRequests env }
     case op of
       Nothing -> pure lan
       Just _ -> pure $ OpLang $ Let v (Lookup (Source $ sourceToOp op sym) (map Ref args)) lan

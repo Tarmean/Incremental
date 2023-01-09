@@ -2,6 +2,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE DataKinds #-}
+-- | Optimization passes for the query language
 module Rewrites where
 
 import CompileQuery
@@ -81,7 +82,7 @@ maxVar = getMax . runQ (
        _ -> Nothing)
  ||| tryQuery_ (\case
        Ref @'Flat v -> Just $ Max (uniq v)
-       a -> Nothing)
+       _ -> Nothing)
  ||| recurse)
 
 

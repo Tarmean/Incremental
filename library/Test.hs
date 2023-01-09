@@ -3,6 +3,7 @@
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Redundant M.pure" #-}
+-- | Some test queries
 module Test where
 import qualified MonadSyntax as M
 import CompileQuery

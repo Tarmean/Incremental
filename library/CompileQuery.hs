@@ -6,6 +6,7 @@
 {-# LANGUAGE UndecidableSuperClasses #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BlockArguments #-}
@@ -22,9 +23,7 @@ import Prettyprinter
 import Prettyprinter.Render.String (renderString)
 import GHC.Stack.Types (HasCallStack)
 import OpenRec
-import Control.Monad.Writer.Strict (WriterT)
-import Control.Applicative
-import Data.List (intercalate, intersperse)
+import Data.List (intersperse)
 
 
 
@@ -78,9 +77,6 @@ a </> b = a <> line <> b
 
 instance Pretty Thunk where
     pretty (Thunk s as) = pretty s <> tupled (map pretty as)
-
--- FIXME: Ref and LRef are sort of interchangeable until higher order relations are compiled away.
--- Could split this into one AST's per phases, but that's a lot of boilerplate
 
 -- | AST for Expression language
 data Expr' (p::Phase) where
@@ -184,6 +180,7 @@ deriving instance Eq Lang
 deriving instance Ord Lang
 deriving instance Show Lang
 instance Data Lang where
+    gfoldl :: (forall d b. Data d => c (d -> b) -> d -> c b) -> (forall g. g -> c g) -> Lang -> c Lang
     gfoldl k z (Bind a b c) = z Bind `k` a `k` b `k` c
     gfoldl k z (Filter a b) = z Filter `k` a `k` b
     gfoldl k z (Return a) = z Return `k` a
@@ -423,22 +420,20 @@ withBoundT locally =
  where boundVars bound = S.fromList [v|(v,_,_) <-  bound]
 
 freeVarsQ :: Data a => a -> S.Set Var
-freeVarsQ = runQ freeVarsQT
-freeVarsQT :: Monad m => Trans (WriterT (S.Set Var) m)
-freeVarsQT =
-    tryQuery_ @Expr \case
+freeVarsQ = runQ ( 
+    tryQuery_ @Expr @_  \case
        Ref v ->   Just (S.singleton v)
        _ -> Nothing
- ||| tryQueryM @Lang (\rec -> \case
-       AsyncBind bound body -> Just ((S.\\ boundVars bound) <$> (rec bound <>* rec body))
-       LRef v -> Just (pure $ S.singleton v)
-       Bind {boundVar, boundExpr, boundBody} -> Just (rec boundExpr <>* fmap (S.delete boundVar) (rec boundBody))
+ ||| tryQuery @Lang (\rec -> \case
+       AsyncBind bound body -> Just (rec bound <> (rec body S.\\ boundVars bound))
+       LRef v -> Just (S.singleton v)
+       Bind {boundVar, boundExpr, boundBody} -> Just (rec boundExpr <> S.delete boundVar (rec boundBody))
        _ -> Nothing)
- ||| tryQueryM @OpLang (\rec -> \case
-       (Unpack exp v body) -> Just (rec exp <>* fmap (S.\\ S.fromList v) (rec body))
+ ||| tryQuery @OpLang (\rec -> \case
+       (Unpack exp v body) -> Just (rec exp <> (rec body S.\\ S.fromList v))
+       Let var exp body -> Just (rec exp <> S.delete var (rec body))
        _ -> Nothing)
  ||| tryQuery_ @Thunk (\(Thunk (Source v) ls) -> Just (S.insert v (S.fromList ls)))
- ||| recurse
+ ||| recurse)
  where
    boundVars bound = S.fromList [v|(v,_,_) <-  bound]
-   (<>*) = liftA2 (<>)

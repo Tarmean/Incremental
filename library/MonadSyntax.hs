@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+-- | Definitions for -XQualifiedDo
 module MonadSyntax where
 
 

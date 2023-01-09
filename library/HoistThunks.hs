@@ -1,5 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BlockArguments #-}
+-- | We compile nested collections into thunks+async requests, this module turns requests into CTE's
 module HoistThunks where
 
 

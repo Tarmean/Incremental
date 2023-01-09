@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE BlockArguments #-}
+-- | This module analyses if/how often identifiers are used, and does inling
 module Analysis where
 
 
