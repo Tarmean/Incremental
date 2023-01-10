@@ -234,6 +234,7 @@ outMultiplicity env (OpLang l) = case l of
   Call _ -> Once
   Force (Thunk t _) -> M.findWithDefault Many t env
   HasType _ t _ -> outMultiplicity env t
+  Distinct t -> outMultiplicity env t
 
 
 optPass :: TopLevel -> TopLevel

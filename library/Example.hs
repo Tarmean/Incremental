@@ -4,7 +4,7 @@ import Analysis (optPass, analyzeArity)
 import CoroutineTransform (doCoroutineTransform)
 import Rewrites (nestedToThunks, simpPass, dropInferred)
 import CompileQuery (toTopLevel, RecLang, TopLevel, pprint)
-import Test (testRetNested)
+import Test (testRetNested, testAgg)
 import HoistThunks (doLifting)
 import Elaborator (elaborate)
 
@@ -12,8 +12,9 @@ import Elaborator (elaborate)
 -- runTest :: RecLang -> TopLevel
 runTest :: RecLang -> TopLevel
 runTest =  simpPass . dropInferred . doCoroutineTransform . doLifting . simpPass . elaborate . nestedToThunks . optPass . toTopLevel
+-- runTest =  simpPass . nestedToThunks . optPass . toTopLevel
 -- runTest = simpPass . nestedToThunks . optPass . toTopLevel
 
 -- | An example function.
 main :: IO ()
-main = pprint $ runTest testRetNested
+main = pprint $ runTest testAgg

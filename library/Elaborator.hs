@@ -44,9 +44,9 @@ elaborate tl = tl { defs = defs' }
             topTys <- traverse (setUVars . lTy . snd . snd) ls
             -- traceM $ show (zipWith addListTy (map fst ls) topTys)
             let topBound = zip bound topTys
-            traverse_ (uncurry unify) topBound 
+            -- traverse_ (uncurry unify) topBound 
             let topBound = zip bound (zipWith addListTy ls topTys)
-            traverse_ (uncurry unify) topBound 
+            -- traverse_ (uncurry unify) topBound 
             pure ls
     topLevel = mempty
 
@@ -104,6 +104,9 @@ tcThunk (Thunk sym _) = do
 tcExpr :: Expr -> M Expr
 tcExpr e@(HasEType {}) = pure e
 tcExpr (Ref r) = setEType (Ref r) <$> lookupVar r
+tcExpr w@(Lit lit) = case lit of
+   IntLit _ -> pure (setEType w intTy)
+   StrLit _ -> pure (setEType w stringTy)
 tcExpr (AThunk thunk) = do
    thunkTy <- tcThunk thunk
    pure $ setEType (AThunk thunk) thunkTy
@@ -123,10 +126,8 @@ tcExpr (Tuple es) = do
 tcExpr (BOp op a b) = do
   a' <- tcExpr a
   b' <- tcExpr b
-  case op of
-    Eql -> do
-        _ <- unify (nTy a') (nTy b') 
-        pure $ setEType (BOp op a' b') (EBase (typeRep @Bool))
+  outTy <- checkEOp op (nTy a') (nTy b') 
+  pure $ setEType (BOp op a' b') outTy
 tcExpr (Aggr op thunk) = do
   thunkTy <- tcThunk thunk
   outTy <- checkOp op thunkTy
@@ -245,6 +246,16 @@ cleanSource (UnificationVar v) = do
         _ -> error "cleanSource: impossible"
 cleanSource o = error ("cleanSource: not a list: " <> show o)
 
+checkEOp :: BOp -> ExprType -> ExprType -> M ExprType
+checkEOp op lty rty = do
+  case op of
+    Eql -> do
+      _ <- unify lty rty
+      pure boolTy
+    Mult -> do
+      _ <- unify lty intTy
+      _ <- unify rty intTy
+      pure intTy
 checkOp :: AggrOp -> ExprType -> M ExprType
 checkOp op ty = do
   st <- freshUVar

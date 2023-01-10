@@ -6,6 +6,7 @@ Experimental compiler to turn nested Haskell into Datalog or SQL.
 The core idea is similar to Database-Supported Haskell (DSH) but the formalism is quite different. Rather than generating numpy-like pointfree code, Incremental uses some standard compiler techniques.
 
 
+
 Haskell queries can contain nested containers, grouping, higher order functions, etc:
 
 ```Haskell
@@ -32,6 +33,8 @@ users_in_group group = S.do
 out = highest_usage (users_in_group "foo")
 ```
 
+
+
 This compiles into a series of flat common table expressions (CTE's)  without lateral joins:
 
 ```SQL
@@ -54,3 +57,81 @@ Currently, the compiler is pretty bare-bones, and clearly does too much de-later
 
 
 The name is from step two of the plan: Compiling (mutually) recursive haskell queries. SQL is not powerful enough for that, so either we'd need a datalog backend or something like pl/pgsql, though
+
+
+## Approach:
+
+
+The compiler works by translating queries into a simple language. We translate nested queries into calls to top-level functions, explicitely passing arguments.
+
+Using a slightly simplified version of the above example:
+
+
+```javascript
+    let v_1 = for y_0 in Distinct for l_4 in #user :: [(Int,)] {
+                             for l_8 in #userGroups :: [(Int, Int)] {
+                                 for l_12 in #userGroups :: [([Char], Int)] {
+                                     when (l_8.0 == l_4.0) when (l_8.1 == l_12.1) when ("mygroup" == l_12.0) yield l_4.0
+                                   }
+                               }
+                           } {
+            yield SUM(v_29(y_0))
+          }
+        v_29 = \y_0 -> for l_30 in #job :: [(Int, Int, Int, Int)] {
+            when (l_30.0 == y_0) yield l_30.1 * l_30.2
+          }
+    in
+    v_1
+```
+
+Function calls are either turned into lazy thunks (structs which hold the variables), or async calls when we actually want to use the result:
+
+```javascript
+    let v_1 = for y_0 in Distinct for l_4 in #user :: [(Int,)] {
+                             for l_8 in #userGroups :: [(Int, Int)] {
+                                 for l_12 in #userGroups :: [([Char], Int)] {
+                                     when (l_8.0 == l_4.0) when (l_8.1 == l_12.1) when ("mygroup" == l_12.0) yield l_4.0
+                                   }
+                               }
+                           } {
+            async { SUM t_30 = v_29(y_0) } yield t_30
+          }
+        v_29 = \y_0 -> for l_30 in #job :: [(Int, Int, Int, Int)] {
+            when (l_30.0 == y_0) yield l_30.1 * l_30.2
+          }
+    in
+    v_1
+```
+
+Then we can turn async calls into
+
+- insertions into a request table
+- plus joins to a result table
+
+The `call` is then an intermediate query which transforms all requests into all results in one pass. This performs memoization and can improve query performance over random accessing.
+
+```javascript
+let v_1 = for l_31 in *stash_30 {
+        let (y_0,) = *l_31 in let t_30 := v_SumT_29 [[y_0]] in yield t_30
+      }
+    v_29 = for p_33 in *stash_30 {
+        for l_35 in Distinct let (u_34,) = *p_33 in yield (u_34,) {
+            let (y_0,) = *l_35
+            in for l_30 in #job :: [(Int, Int, Int, Int)] {
+                when (l_30.0 == y_0) yield ((y_0), l_30.1 * l_30.2)
+              }
+          }
+      }
+    v_SumT_29 = group(SUM) *v_29
+    stash_30 = for y_0 in Distinct for l_4 in #user :: [(Int,)] {
+                              for l_8 in #userGroups :: [(Int, Int)] {
+                                  for l_12 in #userGroups :: [([Char], Int)] {
+                                      when (l_8.0 == l_4.0) when (l_8.1 == l_12.1) when ("mygroup" == l_12.0) yield l_4.0
+                                    }
+                                }
+                            } {
+        yield (y_0)
+      }
+in
+v_1
+```

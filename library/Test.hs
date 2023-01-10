@@ -41,6 +41,28 @@ testRetNested = sec
         b <- OpLang $ Union (iter (Proj 1 2 m)) (iter (Proj 1 2 n))
         M.return (Tuple [Proj 0 2 m, b])
    
+testAgg :: RecLang
+testAgg = Bind (users_in_group (Lit $ StrLit "mygroup")) (Var 0 "y") (Return $ usage (Ref (Var 0 "y")))
+  where
+    jobTable :: RecLang
+    jobTable = table "job" [intTy, intTy, intTy, intTy]
+    userGroupsTable :: RecLang
+    userGroupsTable = table "userGroups" [intTy, intTy]
+    groupsTable :: RecLang
+    groupsTable = table "userGroups" [stringTy, intTy]
+    usage user_id = AggrNested SumT $ M.do
+        a <- jobTable
+        guards (Proj 0 4 a .== user_id)
+        M.return (BOp Mult (Proj 1 4 a) (Proj 2 4 a) )
+    users_in_group group = OpLang $ Distinct $ M.do
+       u <- userTable
+       ug <- userGroupsTable
+       g <- groupsTable
+       guards (Proj 0 2 ug .== Proj 0 1 u)
+       guards (Proj 1 2 ug .== Proj 1 2 g)
+       guards (group .== Proj 0 2 g)
+       M.pure (Proj 0 1 u)
+
 testFlat :: RecLang
 testFlat = M.do
    let a = userTable

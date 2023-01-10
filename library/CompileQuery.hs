@@ -93,10 +93,17 @@ data Expr' (p::Phase) where
     Pack :: {  packLabels :: [Var] } ->  Expr' p
     Lookup :: { lookupTable :: Source, lookupKeys :: [Expr] } -> Expr' p
     HasEType :: TypeStrictness -> Expr' p -> ExprType -> Expr' p
+    Lit :: ALit -> Expr' p
 deriving instance Eq Expr
 deriving instance Ord Expr
 deriving instance Show Expr
 deriving instance Data Expr
+
+data ALit = IntLit Int | StrLit String
+  deriving (Eq, Ord, Show, Data)
+instance Pretty ALit where
+   pretty (IntLit i) = pretty i
+   pretty (StrLit i) = pretty (show i)
 
 
 instance TraverseP Expr'  where
@@ -112,6 +119,7 @@ instance TraverseP Expr'  where
    traverseP _ (Pack ls) = pure $ Pack ls
    traverseP f (HasEType r ex t) = HasEType r <$> traverseP f ex <*> pure t
    traverseP _ (Lookup sym es) = pure $ Lookup sym es
+   traverseP _ (Lit i) = pure (Lit i)
    -- traverseP f (Unpack e ls b) = Unpack <$> traverseP f e <*> pure ls <*> traverseP f b
 (.==) :: Expr' p -> Expr' p -> Expr' p
 (.==) = BOp Eql
@@ -122,6 +130,10 @@ data ExprType = TupleTyp [ExprType] | ListTy ExprType ExprType | UnificationVar 
   deriving (Eq, Ord, Show, Typeable)
 intTy :: ExprType
 intTy = EBase (typeRep (Proxy :: Proxy Int))
+stringTy :: ExprType
+stringTy = EBase (typeRep (Proxy :: Proxy String))
+boolTy :: ExprType
+boolTy = EBase (typeRep (Proxy :: Proxy Bool))
 
 instance Data ExprType where
     gfoldl _ z a@EBase {} = z a
@@ -166,7 +178,7 @@ exprTypeDataType = mkDataType "ExprType" [eTupleConstr, eListTypeConstr, eUnific
 
 newtype Uniq = Uniq Int
   deriving (Eq, Show, Ord, Data)
-data BOp = Eql
+data BOp = Eql | Mult
   deriving (Eq, Ord, Show, Data)
 data Phase = Rec | Flat
 data Lang' (t::Phase) where
@@ -249,7 +261,7 @@ instance TraverseP OpLang' where
     traverseP f (Group a c) = Group a <$> f c
     traverseP f (HasType r a b) = HasType r <$> f a <*> pure b
     traverseP f (Call b) = Call <$> traverseP f b
-    traverseP f (Distinct b) = Distinct <$> traverseP f b
+    traverseP f (Distinct b) = Distinct <$> f b
     traverseP _ (Force b) = pure $ Force b
 type Lang = Lang' 'Flat
 type RecLang = Lang' 'Rec
@@ -295,6 +307,7 @@ instance Pretty ExprType where
     pretty LocalTy = "<HigherOrder>"
 instance Pretty BOp where
     pretty Eql = "=="
+    pretty Mult = "*"
 instance Pretty AggrOp where
     pretty SumT = "SUM"
     pretty MinT = "MIN"
@@ -314,6 +327,7 @@ instance Pretty Expr where
     pretty (HasEType Inferred e ty) = parens $ pretty e <+> ":::" <+> pretty ty
     pretty (HasEType _ e ty) = pretty e <+> "::" <+> pretty ty
     pretty (Lookup v e) = pretty v <+> brackets (pretty e)
+    pretty (Lit i) = pretty i
 instance Pretty Lang where
     pretty (Bind a b c) = group $ nest 2 $ "for" <+> pretty b <+> "in" <+> align (pretty a) <+> "{" <> nest 2 (line <> pretty c) </> "}"
     pretty (LRef v) = "*" <> pretty v
