@@ -36,10 +36,9 @@ This compiles into a series of flat common table expressions (CTE's)  without la
 
 ```SQL
 WITH
-  T0 AS (SELECT G.group_id f0 FROM groups WHERE G.name = "foo")
-  T1 AS (SELECT U.user_id f0
-         FROM Users U, UserGroups UG, T0
-         WHERE U.user_id = UG.user AND UG.group = T.f0)
+  T1 AS (SELECT DISTINCT U.user_id f0
+         FROM Users U, UserGroups UG, groups G
+         WHERE U.user_id = UG.user AND UG.group = G.group_id)
   T2 AS (SELECT U.user_id f0, SUM(j.runtime * j.cpus) f1
          FROM T1, Jobs J
          WHERE T1.f0 = J.user_id

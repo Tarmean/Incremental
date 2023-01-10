@@ -97,7 +97,7 @@ loadInputs locs inps body = do
      loadK (src, projs) = do
         as <- genVar "p"
         projs' <- traverse (load1 as) projs
-        pure $ Bind (LRef $ unSource src) as (foldl1 mkUnion projs')
+        pure $ Bind (LRef $ unSource src) as (OpLang $ Distinct $ foldl1 mkUnion projs')
      mkUnion a b = OpLang (Union a b)
    sources <- traverse loadK inps
    let source = foldl1 (\a b -> OpLang (Union a b)) sources

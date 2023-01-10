@@ -329,7 +329,11 @@ instance Pretty Lang where
 instance Pretty OpLang where
     pretty (Opaque s) = "#" <> pretty s
     pretty (Union a b) = "Union" <+> group (align (pretty a </> pretty b))
-    pretty (Unpack a v c) = group $ "let"<+> align (align (tupled (map (maybe "_" pretty) v)) <> softline <> "=" <+> pretty a) </> "in" <+> pretty c
+    pretty (Unpack a v c) = group $ "let"<+> align (align (mkTuple (map (maybe "_" pretty) v)) <> softline <> "=" <+> pretty a) </> "in" <+> pretty c
+      where
+       mkTuple [] = "()"
+       mkTuple [a] = "(" <> a <> ",)"
+       mkTuple as = tupled as
     pretty (Let v e b) = "let" <+> pretty v <+> ":=" <+> pretty e <> flatAlt line " in " <> pretty b
     pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
     pretty (HasType Inferred e t) = parens $ pretty e <+> ":::" <+> pretty t
