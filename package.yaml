@@ -32,7 +32,6 @@ library:
   - QuickCheck
   - unordered-containers
   - lens
-  - hermit
   source-dirs: library
 
 executables:

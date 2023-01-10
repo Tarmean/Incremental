@@ -18,14 +18,12 @@ import CompileQuery
 import OpenRec
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Rewrites (VarGenT, withVarGenT, genVar, maxVar, withVarGenT')
+import Rewrites (VarGenT, withVarGenT, genVar, maxVar, withVarGenT', MonadVar)
 import Control.Monad.State
-import Data.Maybe (fromMaybe)
 import Control.Applicative ((<|>))
-import Data.Foldable (foldl')
 import Data.Functor.Identity (Identity (runIdentity))
-import Debug.Trace (traceM, trace)
-import Data.Containers.ListUtils (nubOrd)
+import qualified Data.IntSet as IS
+import Data.Bifunctor (second)
 
 
 
@@ -33,10 +31,13 @@ data CTEnv = CTEnv {
     nameGen :: Int,
     locals :: S.Set Var,
     generatedBindings :: M.Map Source Lang,
-    generatedRequests :: [(Source, [Var], Source, Maybe AggrOp)],
+    generatedRequests :: [(Source, Projections, Source, Maybe AggrOp)],
     lastLabel :: Source,
     firstLabel :: Maybe Source
 }
+data Projections = Projections { usedS :: IS.IntSet, totalFields :: Int }
+  deriving (Eq, Ord, Show)
+
 type M = VarGenT (State CTEnv)
 
 
@@ -65,12 +66,16 @@ doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (gene
     funs = runIdentity $ withVarGenT varGen' $ fmap (M.fromListWith (error "key collision") . concat) $ traverse (uncurry doFun) $ M.toList $ M.filter (not . null . fst) (defs tl)
     -- !_ = error (show sources)
     doFun k (args, body) = do
-       body' <- loadInputs args (nubOrd inputs) (mapExpr (\x -> Tuple [Pack args, x]) body)
+       body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Pack args, x]) body)
        let aggs = doAggregates k ops
        pure $ (k, ([], body')):aggs
       where
-        inputs = M.findWithDefault [] k sources
+        inputs = collect $ M.findWithDefault [] k sources
         ops = M.findWithDefault [] k aggregates
+
+collect :: (Ord b, Ord a) => [(a, b)] -> [(a, [b])]
+collect = M.toList . M.map S.toList . M.fromListWith (<>) . map (second S.singleton)
+
 
 mapExpr :: (Expr -> Expr) -> Lang -> Lang
 mapExpr f (Return a) = Return $ f a
@@ -82,18 +87,32 @@ doAggregates (Source (Var i s)) aggs = [
     (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group agg (LRef $ Var i s))) | agg <- aggs
   ]
 
-loadInputs :: [Var] -> [(Source, [Var])] -> Lang -> VarGenT Identity Lang
+loadInputs :: [Var] -> [(Source, [Projections])] -> Lang -> VarGenT Identity Lang
 loadInputs _ [] body = pure body
 loadInputs locs inps body = do
    let
-     load1 (src, vars) = do
+     load1 as proj = do
+        (unpacked, used) <- makeUnpacked proj
+        pure $ OpLang $ Unpack (LRef as) unpacked (Return $ Tuple $ map Ref used)
+     loadK (src, projs) = do
         as <- genVar "p"
-        pure $ Bind (LRef $ unSource src) as (OpLang $ Unpack (LRef as) vars (Return $ Tuple (map Ref vars)))
-       
-   sources <- traverse load1 inps
+        projs' <- traverse (load1 as) projs
+        pure $ Bind (LRef $ unSource src) as (foldl1 mkUnion projs')
+     mkUnion a b = OpLang (Union a b)
+   sources <- traverse loadK inps
    let source = foldl1 (\a b -> OpLang (Union a b)) sources
    l <- genVar "l"
-   pure $ Bind  source l (OpLang $ Unpack (LRef l) locs body)
+   pure $ Bind  source l (OpLang $ Unpack (LRef l) (fmap Just locs) body)
+
+makeUnpacked :: MonadVar m => Projections -> m ([Maybe Var], [Var])
+makeUnpacked (Projections used total) = do
+  let countUsed = IS.size used
+  newVars <- replicateM countUsed (genVar "u")
+  let byPos = M.fromList $ zip (IS.toList used) newVars
+  let atPos = [byPos M.!? i | i <- [0..total-1]]
+  pure (atPos, newVars)
+
+
 
 renameEntry :: Source -> Source -> M.Map Source Lang -> M.Map Source Lang
 renameEntry old new m = case m M.!? old of
@@ -101,18 +120,18 @@ renameEntry old new m = case m M.!? old of
     Nothing -> m
 
 
-tellRequest :: Var -> (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
-tellRequest s (v, op, Thunk sym args) lan = do
-    modify $ \env -> env { generatedRequests = (sourceToRequest sym, args, Source s, op) : generatedRequests env }
+tellRequest :: ([Var] -> Projections) -> Var -> (Var, Maybe AggrOp, Thunk) -> Lang -> M Lang
+tellRequest toProj s (v, op, Thunk sym args) lan = do
+    modify $ \env -> env { generatedRequests = (sourceToRequest sym, toProj args, Source s, op) : generatedRequests env }
     case op of
       Nothing -> pure lan
       Just _ -> pure $ OpLang $ Let v (Lookup (Source $ sourceToOp op sym) (map Ref args)) lan
 
-tellRequests :: Var -> [(Var, Maybe AggrOp, Thunk)] -> Lang -> M Lang
-tellRequests _ [] lan = pure lan
-tellRequests v (x:xs) lan = do
-    r <- tellRequests v xs lan
-    tellRequest v x r
+tellRequests :: ([Var] -> Projections) -> Var -> [(Var, Maybe AggrOp, Thunk)] -> Lang -> M Lang
+tellRequests _ _ [] lan = pure lan
+tellRequests freeMap v (x:xs) lan = do
+    r <- tellRequests freeMap v xs lan
+    tellRequest freeMap v x r
 
 sourceToOp :: Maybe AggrOp -> Source -> Var
 sourceToOp Nothing (Source s) = s
@@ -124,17 +143,21 @@ coroutineTransform :: (Lang -> S.Set Var) -> Trans M
 coroutineTransform freeVars = tryTransM (\rec -> \case
     w@(AsyncBind binds e :: Lang) -> Just $ do
       let frees = freeVars w
+          freeMap = M.fromList $ zip (S.toList frees) [0..]
       stash <- genVar "stash"
-      out <- tellRequests stash binds =<< rec e
+      out <- tellRequests (toProjections freeMap) stash binds =<< rec e
       bindVar <- genVar "l"
       outLabel <- genVar "out"
-      let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (LRef bindVar) (S.toList frees) out)
+      let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (LRef bindVar) (Just <$> S.toList frees) out)
       let self = Return (Pack (S.toList frees))
       tellGenerated outLabel nested
       modify $ \s -> s { firstLabel = firstLabel s <|> Just (Source stash), lastLabel = Source outLabel }
       pure self
     _ -> Nothing)
     ||| recurse
+
+toProjections :: M.Map Var Int -> [Var] -> Projections
+toProjections freeMap args = Projections (IS.fromList $ map (freeMap M.!) args) (M.size freeMap)
 
 tellGenerated :: Var -> Lang -> M ()
 tellGenerated v l = modify $ \env -> env { generatedBindings = M.insert (Source v) l (generatedBindings env) }

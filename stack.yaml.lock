@@ -29,38 +29,6 @@ packages:
   original:
     commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
     git: https://github.com/Tarmean/data-reify.git
-- completed:
-    hackage: hermit-1.0.1@sha256:113c7ce268a0d0c16da03dc2f160e33bd7fe55c0f4135236477f33e44de3059c,10050
-    pantry-tree:
-      sha256: e875337e0230e30be950d141457afa0bfea91caef5779914bd854dbdcf44cf2a
-      size: 8195
-  original:
-    hackage: hermit-1.0.1@sha256:113c7ce268a0d0c16da03dc2f160e33bd7fe55c0f4135236477f33e44de3059c,10050
-- completed:
-    hackage: kure-2.18.6@sha256:180de0a401e901727bfadd12ed6f7295921551c3d2017421c245caa3f12f1ead,2797
-    pantry-tree:
-      sha256: f97e6f84712798a36bb818770d1b630d7a67ac6db69ff9d9059252839c55819b
-      size: 2029
-  original:
-    hackage: kure-2.18.6@sha256:180de0a401e901727bfadd12ed6f7295921551c3d2017421c245caa3f12f1ead,2797
-- completed:
-    commit: f44c7f2006a838d21cbc9b61369b42863b7c635c
-    git: https://github.com/Tarmean/marked-pretty
-    name: marked-pretty
-    pantry-tree:
-      sha256: 219b31f51d942462fa6a67830dc1764b3e839a64a8bd20847ee1437e2383c94f
-      size: 576
-    version: 1.1.2.1
-  original:
-    commit: f44c7f2006a838d21cbc9b61369b42863b7c635c
-    git: https://github.com/Tarmean/marked-pretty
-- completed:
-    hackage: dlist-0.8.0.8@sha256:90ca348bffdc62d7070bcf0e97c728f8d01b24fbc7ea08d2909157d0da76534c,2066
-    pantry-tree:
-      sha256: 1b5b9142a932f15c77f758f92f90bea6c805c42d4c62f7a697e8e4f6cf1ad6e6
-      size: 426
-  original:
-    hackage: dlist-0.8.0.8@sha256:90ca348bffdc62d7070bcf0e97c728f8d01b24fbc7ea08d2909157d0da76534c,2066
 snapshots:
 - completed:
     sha256: 5201b267da5c16bde723e0401eed332c96035edd55250a947089a7d9417b7ecc

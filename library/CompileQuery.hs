@@ -24,6 +24,7 @@ import Prettyprinter.Render.String (renderString)
 import GHC.Stack.Types (HasCallStack)
 import OpenRec
 import Data.List (intersperse)
+import Data.Maybe (catMaybes)
 
 
 
@@ -228,7 +229,7 @@ data TypeStrictness = Inferred | Given
 data OpLang' (t::Phase)
   = Opaque String
   | Union (Lang' t) (Lang' t)
-  | Unpack { unpack :: Lang' t, labels :: [Var], unpackBody :: Lang' t }
+  | Unpack { unpack :: Lang' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
   | Group { groupBy :: AggrOp, groupBody :: Lang' t }
   | Call { nestedCall :: Expr' t }
@@ -310,7 +311,7 @@ instance Pretty Expr where
     pretty (AThunk a) = pretty a
     pretty (Nest a) = "Nest" <+> pretty a
     pretty (Pack a) = tupled (map pretty a)
-    pretty (HasEType Inferred e ty) = parens $ pretty e <+> "::" <+> pretty ty
+    pretty (HasEType Inferred e ty) = parens $ pretty e <+> ":::" <+> pretty ty
     pretty (HasEType _ e ty) = pretty e <+> "::" <+> pretty ty
     pretty (Lookup v e) = pretty v <+> brackets (pretty e)
 instance Pretty Lang where
@@ -328,10 +329,10 @@ instance Pretty Lang where
 instance Pretty OpLang where
     pretty (Opaque s) = "#" <> pretty s
     pretty (Union a b) = "Union" <+> group (align (pretty a </> pretty b))
-    pretty (Unpack a v c) = group $ "let"<+> align (align (tupled (map pretty v)) <> softline <> "=" <+> pretty a) </> "in" <+> pretty c
-    pretty (Let v e b) = group $ "let" <+> pretty v <+> ":=" <+> pretty e </> pretty b
+    pretty (Unpack a v c) = group $ "let"<+> align (align (tupled (map (maybe "_" pretty) v)) <> softline <> "=" <+> pretty a) </> "in" <+> pretty c
+    pretty (Let v e b) = "let" <+> pretty v <+> ":=" <+> pretty e <> flatAlt line " in " <> pretty b
     pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
-    pretty (HasType Inferred e t) = parens $ pretty e <+> "::" <+> pretty t
+    pretty (HasType Inferred e t) = parens $ pretty e <+> ":::" <+> pretty t
     pretty (HasType _ e t) = pretty e <+> "::" <+> pretty t
     pretty (Call e) = "?" <> pretty e
     pretty (Force t) = "!" <> pretty t
@@ -414,7 +415,7 @@ withBoundT locally =
        Bind {boundVar, boundExpr, boundBody} -> Just (Bind <$> rec boundExpr <*> pure boundVar <*> locally (S.singleton boundVar) (rec boundBody))
        _ -> Nothing)
  ||| tryTransM @OpLang (\rec -> \case
-       (Unpack exp vs body) -> Just (Unpack <$> rec exp <*> pure vs <*> locally (S.fromList vs) (rec body))
+       (Unpack exp vs body) -> Just (Unpack <$> rec exp <*> pure vs <*> locally (S.fromList $ catMaybes vs) (rec body))
        (Let v exp body) -> Just (Let v <$> rec exp <*> locally (S.singleton v) (rec body))
        _ -> Nothing)
  where boundVars bound = S.fromList [v|(v,_,_) <-  bound]
@@ -430,7 +431,7 @@ freeVarsQ = runQ (
        Bind {boundVar, boundExpr, boundBody} -> Just (rec boundExpr <> S.delete boundVar (rec boundBody))
        _ -> Nothing)
  ||| tryQuery @OpLang (\rec -> \case
-       (Unpack exp v body) -> Just (rec exp <> (rec body S.\\ S.fromList v))
+       (Unpack exp v body) -> Just (rec exp <> (rec body S.\\ S.fromList (catMaybes v)))
        Let var exp body -> Just (rec exp <> S.delete var (rec body))
        _ -> Nothing)
  ||| tryQuery_ @Thunk (\(Thunk (Source v) ls) -> Just (S.insert v (S.fromList ls)))

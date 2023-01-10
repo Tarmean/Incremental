@@ -2,6 +2,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE BlockArguments #-}
 -- | Optimization passes for the query language
 module Rewrites where
 
@@ -184,6 +185,18 @@ nestedToThunks tl0 =  tl
       Just (args, _) -> Just args
       Nothing 
         | otherwise -> Nothing
+
+dropInferred :: Data a => a -> a
+dropInferred = runT' (
+  recurse >>>
+      tryTrans_ @Lang \case
+         (OpLang (HasType Inferred e _)) -> Just e
+         _ -> Nothing
+  |||
+      tryTrans_ @Expr \case
+         (HasEType Inferred e _) -> Just e
+         _ -> Nothing
+  )
 
 dropTopLevel :: TopLevel' p -> TopLevel' p
 dropTopLevel a = a { defs = M.map dropDefs (defs a) }

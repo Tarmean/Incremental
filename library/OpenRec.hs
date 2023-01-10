@@ -15,6 +15,7 @@ import Debug.Trace (trace)
 import Control.Monad.Trans (lift)
 import qualified Data.HashSet as S
 import HitTest (Answer(..), hitTest, Oracle(..), typeRepOf)
+import Data.Functor.Identity (runIdentity, Identity)
 
 
 -- | Data gives us a way to get the type of a value, and to traverse its children
@@ -40,6 +41,15 @@ data Trans m = T {
     withCtx :: Ctx m -> Trans1 m
 }
 
+runT' :: Data a => Trans Identity -> a -> a
+runT' trans a0 = runIdentity (f a0)
+  where
+    Oracle oracle = hitTest a0 (relevant trans)
+    f :: forall x. Data x => x -> Identity x
+    f x = case oracle x of
+      Hit _ -> withCtx trans (Ctx pure pure f) x
+      Follow -> if toplevelRecursion trans then gmapM f x else pure x
+      Miss -> pure x
 
 -- | The core run function
 runT :: forall m a. (Monad m, Data a) => Trans m -> a -> m a

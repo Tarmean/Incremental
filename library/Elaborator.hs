@@ -199,9 +199,12 @@ tcOpLang (Unpack l vs body) = do
   l' <- tcLang l
   case lTy l' of
     TupleTyp tys -> do
-      body' <- local (M.union (M.fromList (zipStrict vs tys))) (tcLang body)
+      body' <- local (M.union (M.fromList [ (a,b) | (Just a, b) <- zipStrict vs tys])) (tcLang body)
       pure $ HasType Inferred (OpLang $ Unpack l' vs body') (lTy body')
     _ -> throwError ("tcOpLang: Unpack on non-record: " <> prettyS l')
+tcOpLang (Distinct e) = do
+    e' <- tcLang e
+    pure $ HasType Inferred (OpLang $ Distinct e') (lTy e')
 tcOpLang (Let v e body) = do
    e' <- tcExpr e
    body' <- local (M.insert v (nTy e')) (tcLang body)
@@ -227,6 +230,7 @@ tcOpLang (Group op body) = do
     mapTyVal :: ExprType -> M ExprType
     mapTyVal (ListTy k (TupleTyp [_,b])) = pure $ ListTy k b
     mapTyVal ty = throwError ("mapTyVal: not a key-value pair: " <> show ty)
+
 
 cleanSource :: ExprType -> M ExprType
 cleanSource (ListTy _ a) = do

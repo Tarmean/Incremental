@@ -17,7 +17,6 @@ import Data.Coerce (coerce)
 import qualified Data.Set as S
 import Data.Bifunctor (second)
 import Data.Functor.Identity (Identity(runIdentity))
-import Debug.Trace (trace)
 import Data.Maybe (fromMaybe)
 
 
