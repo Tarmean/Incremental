@@ -58,6 +58,12 @@ Currently, the compiler is pretty bare-bones, and clearly does too much de-later
 
 The name is from step two of the plan: Compiling (mutually) recursive haskell queries. SQL is not powerful enough for that, so either we'd need a datalog backend or something like pl/pgsql, though
 
+## Related
+
+DSH and the ferry compiler are the obvious (and pretty much only) prior approaches. Unfortunately, they mirrored Data Parallel Haskell in both approach (the "flattening transformation") and destiny: Very complex implementations, no longer supported, and unusable with current compiler versions. The new technique here hopefully does the same transformations, should yield even better SQL, and require  *much* less code to implement.
+
+A related experiment is HaskellORM, which uses a less expressive query language but offers automatic updates. Here, we view the query as an in-memory view of the DB.
+The core type in HaskellORM is not query or ORM specific, so automatic updates should be workable for Incremental (assuming the queries fulfills some simple fundep constraints) https://github.com/Tarmean/HaskellORM/blob/master/library/Classes.hs#L713
 
 ## Approach:
 
