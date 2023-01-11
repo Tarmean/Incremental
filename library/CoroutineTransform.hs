@@ -66,7 +66,7 @@ doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (gene
     funs = runIdentity $ withVarGenT varGen' $ fmap (M.fromListWith (error "key collision") . concat) $ traverse (uncurry doFun) $ M.toList $ M.filter (not . null . fst) (defs tl)
     -- !_ = error (show sources)
     doFun k (args, body) = do
-       body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Pack args, x]) body)
+       body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Tuple (fmap Ref args), x]) body)
        let aggs = doAggregates k ops
        pure $ (k, ([], body')):aggs
       where
@@ -76,11 +76,6 @@ doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (gene
 collect :: (Ord b, Ord a) => [(a, b)] -> [(a, [b])]
 collect = M.toList . M.map S.toList . M.fromListWith (<>) . map (second S.singleton)
 
-
-mapExpr :: (Expr -> Expr) -> Lang -> Lang
-mapExpr f (Return a) = Return $ f a
-mapExpr f (Bind a v b) = Bind a v (mapExpr f b)
-mapExpr f a = runIdentity $ traverseP (pure . mapExpr f) a
 
 doAggregates :: Source -> [AggrOp] -> [(Source, ([a], Lang))]
 doAggregates (Source (Var i s)) aggs = [
@@ -93,7 +88,7 @@ loadInputs locs inps body = do
    let
      load1 as proj = do
         (unpacked, used) <- makeUnpacked proj
-        pure $ OpLang $ Unpack (LRef as) unpacked (Return $ Tuple $ map Ref used)
+        pure $ OpLang $ Unpack (Ref as) unpacked (Return $ Tuple $ map Ref used)
      loadK (src, projs) = do
         as <- genVar "p"
         projs' <- traverse (load1 as) projs
@@ -102,7 +97,7 @@ loadInputs locs inps body = do
    sources <- traverse loadK inps
    let source = foldl1 (\a b -> OpLang (Union a b)) sources
    l <- genVar "l"
-   pure $ Bind  source l (OpLang $ Unpack (LRef l) (fmap Just locs) body)
+   pure $ Bind  source l (OpLang $ Unpack (Ref l) (fmap Just locs) body)
 
 makeUnpacked :: MonadVar m => Projections -> m ([Maybe Var], [Var])
 makeUnpacked (Projections used total) = do
@@ -148,8 +143,8 @@ coroutineTransform freeVars = tryTransM (\rec -> \case
       out <- tellRequests (toProjections freeMap) stash binds =<< rec e
       bindVar <- genVar "l"
       outLabel <- genVar "out"
-      let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (LRef bindVar) (Just <$> S.toList frees) out)
-      let self = Return (Pack (S.toList frees))
+      let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (Ref bindVar) (Just <$> S.toList frees) out)
+      let self = Return (Tuple $ fmap Ref (S.toList frees))
       tellGenerated outLabel nested
       modify $ \s -> s { firstLabel = firstLabel s <|> Just (Source stash), lastLabel = Source outLabel }
       pure self
@@ -161,64 +156,4 @@ toProjections freeMap args = Projections (IS.fromList $ map (freeMap M.!) args) 
 
 tellGenerated :: Var -> Lang -> M ()
 tellGenerated v l = modify $ \env -> env { generatedBindings = M.insert (Source v) l (generatedBindings env) }
-
--- newtype Ctx r m a = { onSuccess :: a -> r }
--- out: Lang -> Lang
--- inner: (a -> m Lang) -> m Lang
---
---
--- pseudocode, for now:
-
--- handle (Bind a v b) = do
---    a <- handle a
---    Bind a v <$> cut (handle b)
--- handle (AThunk (Thunk f ls)) = do
---     ctx <- getContext
---     locals <- getLocals
---     temp <- Temp ctx (Return (Pack locals))
---     makeRequests f ls temp
---     v1 <- genVar
---     v2 <- genVar
---     let ctx' a = For v1 temp (Unpack ls v1) (Lookup v2 f (Tuple ls) a)
---     setContext ctx'
---     pure (proj "out" v2)
-
-
-
--- Pause a computation, compute a request, and resume with the result.
---
--- This requires four steps:
--- - Store live variables in a temp table
--- - Project the request into a request table
--- - Calculate the result table from the request table
--- - Join the temp table with the result table
---
--- This is Datalog's Magic Set transform, and C#'s coroutine transform
---
--- We need to split a single query into a sequence slices. This will be a traversal with a monad transformer.
---
--- Example:
--- @
--- let v_1 = for l_2 in #user {yield (l_2, SUM(v_5(l_2)))}
---     v_5[l_2] = for l_6 in #foo {when (l_2 == l_6::AnyType) yield l_6}
--- in v_1
--- @
---
--- Here, @SUM(v_5(l_2))@ is a thunk in a strict context.
---
--- @
--- let v_temp_1 = for l_2 in #user {yield pack{l_2}}
---     vreq_5 = v_temp_1
---     vres_5 = groupBy(SUM, for l_2 in vreq_5 { for l_6 in #foo {when (l_2 == l_6::AnyType) yield Tuple [l_2, l_6] }})
---  --    v_5[l_2] = for l_6 in #foo {when (l_2 == l_6::AnyType) yield l_6}
---     v_1 = for l_2 in v_temp_1 { yield (l_2, v_5[l_2]) }
--- in v_1
--- @
---
---Which should simplify to
--- @
--- let vres_5 = groupBy(SUM, for l_2 in #user { for l_6 in #foo {when (l_2 == l_6::AnyType) yield Tuple [l_2, l_2] }})
---     v_1 = for l_2 in #user { yield (l_2, v_5[l_2]) }
--- in v_1
--- @
 

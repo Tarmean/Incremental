@@ -11,11 +11,14 @@ module OpenRec where
 import Data.Data hiding (gmapM)
 import Control.Monad.Writer.Strict (Writer, MonadWriter (tell), execWriter, WriterT, execWriterT)
 import Control.Monad ((<=<))
-import Debug.Trace (trace)
+import Debug.Trace (trace, traceM)
 import Control.Monad.Trans (lift)
 import qualified Data.HashSet as S
 import HitTest (Answer(..), hitTest, Oracle(..), typeRepOf)
 import Data.Functor.Identity (runIdentity, Identity)
+import GHC.Base (oneShot)
+import Util (prettyS)
+import Prettyprinter (Pretty)
 
 
 -- | Data gives us a way to get the type of a value, and to traverse its children
@@ -29,6 +32,11 @@ data Ctx m = Ctx {
   -- | Top-level vtable for recursion
   onRecurse :: Trans1 m
   }
+
+data RecType = NoRec | BasicRec | ComplexRec
+  deriving (Eq, Ord, Show)
+instance Semigroup RecType where
+ (<>) = max
 -- | A traversal collects a relevant sets of types to visit,
 -- and a visitor functions to apply to those types
 data Trans m = T {
@@ -36,20 +44,13 @@ data Trans m = T {
     relevant :: !(S.HashSet TypeRep),
     -- | Should we recurse when the current type is not in @relevant@, but contains @relevant@ types?
     -- True, iff @withCtx@ would call @recurse@.
-    toplevelRecursion :: Bool,
+    toplevelRecursion :: RecType,
     -- | Actualy transformation  function
     withCtx :: Ctx m -> Trans1 m
 }
 
 runT' :: Data a => Trans Identity -> a -> a
-runT' trans a0 = runIdentity (f a0)
-  where
-    Oracle oracle = hitTest a0 (relevant trans)
-    f :: forall x. Data x => x -> Identity x
-    f x = case oracle x of
-      Hit _ -> withCtx trans (Ctx pure pure f) x
-      Follow -> if toplevelRecursion trans then gmapM f x else pure x
-      Miss -> pure x
+runT' trans a0 = runIdentity (runT trans a0)
 
 -- | The core run function
 runT :: forall m a. (Monad m, Data a) => Trans m -> a -> m a
@@ -58,10 +59,23 @@ runT trans a0 = f a0
     Oracle oracle = hitTest a0 (relevant trans)
     f :: forall x. Data x => x -> m x
     f x = case oracle x of
-      Hit _ -> withCtx trans (Ctx pure pure f) x
-      Follow -> if toplevelRecursion trans then gmapM f x else pure x
       Miss -> pure x
+      Follow -> case toplevelRecursion trans of
+         BasicRec -> gmapM f x 
+         NoRec -> pure x
+         ComplexRec ->  go x
+      Hit _ -> go x
+    go :: forall x. Data x => x -> m x
+    go = withCtx trans (Ctx pure pure f)
 
+failed :: Trans m
+failed = T mempty NoRec (\Ctx{..} a -> onFailure a)
+
+loggingM :: (Pretty a, Monad m) => String -> m a -> Trans m
+loggingM tag logs = T mempty NoRec (\Ctx{..} a -> do
+  s <- logs
+  traceM (tag <> prettyS s)
+  onSuccess a)
 -- [Note: Oracle]
 -- Types form a tree. We have a root type @a@, which is the type of the value we are transforming.
 --
@@ -97,7 +111,7 @@ gmapM f = gfoldl k pure
 l ||| r = T relevantTypes containsRecursion trans
   where
     relevantTypes = relevant l `S.union` relevant r
-    containsRecursion = toplevelRecursion l || toplevelRecursion r
+    containsRecursion = toplevelRecursion l <> toplevelRecursion r
     trans :: Ctx m -> Trans1 m
     trans ctx = withCtx l (ctx { onFailure = withCtx r ctx })
 infixl 1 |||
@@ -120,7 +134,7 @@ infixl 1 >>>
 l &&& r = T relevantTypes containsRecursion trans
   where
     relevantTypes = relevant l `S.union` relevant r
-    containsRecursion = toplevelRecursion l || toplevelRecursion r
+    containsRecursion = toplevelRecursion l <> toplevelRecursion r
     trans :: Ctx m -> Trans1 m
     trans ctx = withCtx l ctx{ onSuccess = withCtx r ctx, onFailure = withCtx r ctx }
 infixl 1 &&&
@@ -144,10 +158,10 @@ infixl 1 &&&
 --    _ -> Nothing
 -- @
 recurse :: Monad m => Trans m
-recurse = T mempty True $ \Ctx{..} -> onSuccess <=< gmapM onRecurse
+recurse = T mempty BasicRec $ \Ctx{..} -> onSuccess <=< gmapM onRecurse
 
 tryQueryM :: forall a o m. (Monad m, Monoid o, Data a) => ((forall x. Data x => x -> m o) -> a -> Maybe (m o)) -> Trans (WriterT o m)
-tryQueryM f = T (onlyRel @a) False $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
+tryQueryM f = T (onlyRel @a) NoRec $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> case f (execWriterT . onRecurse) a' of
       Nothing -> onFailure a'
       Just o -> lift o >>= tell >> onSuccess a'
@@ -157,35 +171,40 @@ tryQueryM f = T (onlyRel @a) False $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
 onlyRel :: forall a. Typeable a => S.HashSet TypeRep
 onlyRel = S.singleton (typeRepOf @a)
 tryQuery :: forall a o. (Monoid o, Data a) => ((forall x. Data x => x -> o) -> a -> Maybe o) -> Trans (Writer o)
-tryQuery f = T (onlyRel @a) False $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
+tryQuery f = T (onlyRel @a) NoRec $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> case f (execWriter . onRecurse) a' of
       Nothing -> onFailure a'
       Just o -> tell o >> onSuccess a'
   Nothing -> onFailure a'
 tryQuery_ :: forall a o m. (Monad m, Monoid o, Data a) => (a -> Maybe o) -> Trans (WriterT o m)
-tryQuery_ f = T (onlyRel @a) False $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
+tryQuery_ f = T (onlyRel @a) NoRec $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> case f a' of
       Nothing -> onFailure a'
       Just o -> tell o *> onSuccess a'
   Nothing -> onFailure a'
 
 tryTrans :: forall a m. (Monad m, Data a) => (a -> Maybe a) -> Trans m
-tryTrans f = T (onlyRel @a) False $ \Ctx{..} (a::a') -> case eqT @a @a' of
+tryTrans f = T (onlyRel @a) NoRec $ \Ctx{..} (a::a') -> case eqT @a @a' of
   Just Refl -> case f a of
      Nothing -> onFailure a
      Just a' -> onSuccess a'
   Nothing -> onFailure a
 
 tryTransM :: forall a m. (Monad m, Data a) => (Trans1 m -> a -> Maybe (m a)) -> Trans m
-tryTransM f = T (onlyRel @a) False $ \Ctx{..} (a::a') -> case eqT @a @a' of
+tryTransM f = T (onlyRel @a) NoRec $ \Ctx{..} (a::a') -> case eqT @a @a' of
   Just Refl -> case f onRecurse a of
      Nothing -> onFailure a
      Just ma' -> onSuccess =<< ma'
   Nothing -> onFailure a
 tryTransM_ :: forall a m. (Monad m, Data a) => (a -> Maybe (m a)) -> Trans m
 tryTransM_ f = tryTransM (\_ -> f)
-tryTrans_ :: forall a m. (Monad m, Data a) => (a -> Maybe a) -> Trans m
-tryTrans_ f = tryTransM (\_ -> fmap pure . f)
+
+tryTrans_ :: forall a m. (Applicative m, Data a) => (a -> Maybe a) -> Trans m
+tryTrans_ f = T (onlyRel @a) NoRec $ \Ctx{..} (a::a') -> case eqT @a @a' of
+  Just Refl -> case f a of
+     Nothing -> onFailure a
+     Just b -> onSuccess b
+  Nothing -> onFailure a
 
 completelyTrans' :: forall m. (Monad m) => Trans m -> Trans m
 completelyTrans' f = T (relevant f) (toplevelRecursion f) $ \Ctx{..} a0 -> 
@@ -203,11 +222,10 @@ completelyTrans f = tryTrans (fixpoint False)
       Just a' -> fixpoint True a'
 
 -- stop recursion here, nested `recurse` statements will jump to the block
-block :: forall m. Trans m -> Trans m
-block (T rel tlRec f) = T rel tlRec $ \Ctx{..} ->
-    let rec :: Data x => x -> m x
-        rec = f (Ctx onSuccess onFailure rec)
-    in rec
+block :: forall m. Monad m => Trans m -> Trans m
+block t = T (relevant t) ComplexRec (\Ctx{onSuccess} x ->
+    runT t x >>= onSuccess)
+
 
 (.:) :: (b -> c) -> (a1 -> a2 -> b) -> a1 -> a2 -> c
 (.:) = (.).(.)

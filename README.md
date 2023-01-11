@@ -135,3 +135,24 @@ let v_1 = for l_31 in *stash_30 {
 in
 v_1
 ```
+
+Which simplifies to:
+
+```javascript
+let v_0 = for l_4 in  *stash_3  { yield v_SumT_1[l_4.0] }
+    v_SumT_1 = group(SUM) *v_2
+    v_2 = for p_7 in  *stash_3  {
+        for l_11 in  #job :: [(Int, Int, Int, Int)]  {
+            when (l_11.0 == p_7.0) yield ((p_7.0,), l_11.1 * l_11.2)
+            }
+        }
+    stash_3 = Distinct for l_12 in  #user :: [(Int,)]  {
+        for l_13 in  #userGroups :: [(Int, Int)]  {
+            for l_14 in  #userGroups :: [([Char], Int)]  {
+                when (l_13.0 == l_12.0 && l_13.1 == l_14.1 && "mygroup" == l_14.0) yield (l_12.0,)
+                }
+            }
+        }
+in
+v_0
+```

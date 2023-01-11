@@ -11,7 +11,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BlockArguments #-}
 -- | Synatx tree types, pretty printing, and core Definitions
-module CompileQuery where
+module CompileQuery (module CompileQuery, module Util) where
 import qualified Data.Set as S
 import qualified Data.Map.Strict as M
 import Control.Monad.State
@@ -24,7 +24,9 @@ import Prettyprinter.Render.String (renderString)
 import GHC.Stack.Types (HasCallStack)
 import OpenRec
 import Data.List (intersperse)
+import Util
 import Data.Maybe (catMaybes)
+import Data.Functor.Identity (runIdentity)
 
 
 
@@ -90,8 +92,7 @@ data Expr' (p::Phase) where
     Aggr :: AggrOp -> Thunk -> Expr' p
     AggrNested :: AggrOp -> (Lang' p) -> Expr' p
     Nest :: Lang' a -> Expr' a
-    Pack :: {  packLabels :: [Var] } ->  Expr' p
-    Lookup :: { lookupTable :: Source, lookupKeys :: [Expr] } -> Expr' p
+    Lookup :: { lookupTable :: Source, lookupKeys :: [Expr' p] } -> Expr' p
     HasEType :: TypeStrictness -> Expr' p -> ExprType -> Expr' p
     Lit :: ALit -> Expr' p
 deriving instance Eq Expr
@@ -116,11 +117,9 @@ instance TraverseP Expr'  where
    traverseP f (AggrNested op a) = AggrNested op <$> f a
    traverseP _ (Aggr _ _) = error "aggr"
    traverseP f (Nest o) = Nest <$> f o
-   traverseP _ (Pack ls) = pure $ Pack ls
    traverseP f (HasEType r ex t) = HasEType r <$> traverseP f ex <*> pure t
-   traverseP _ (Lookup sym es) = pure $ Lookup sym es
+   traverseP f (Lookup sym es) = Lookup sym <$> traverse (traverseP f) es
    traverseP _ (Lit i) = pure (Lit i)
-   -- traverseP f (Unpack e ls b) = Unpack <$> traverseP f e <*> pure ls <*> traverseP f b
 (.==) :: Expr' p -> Expr' p -> Expr' p
 (.==) = BOp Eql
 data AggrOp = SumT | MinT | MaxT
@@ -178,7 +177,7 @@ exprTypeDataType = mkDataType "ExprType" [eTupleConstr, eListTypeConstr, eUnific
 
 newtype Uniq = Uniq Int
   deriving (Eq, Show, Ord, Data)
-data BOp = Eql | Mult
+data BOp = Eql | Mult | And
   deriving (Eq, Ord, Show, Data)
 data Phase = Rec | Flat
 data Lang' (t::Phase) where
@@ -241,13 +240,13 @@ data TypeStrictness = Inferred | Given
 data OpLang' (t::Phase)
   = Opaque String
   | Union (Lang' t) (Lang' t)
-  | Unpack { unpack :: Lang' t, labels :: [Maybe Var], unpackBody :: Lang' t }
+  | Unpack { unpack :: Expr' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
   | Group { groupBy :: AggrOp, groupBody :: Lang' t }
   | Call { nestedCall :: Expr' t }
+  | Distinct (Lang' t)
   | Force { thunked :: Thunk }
   | HasType { rigidity :: TypeStrictness, langType :: Lang' t, hasTypeType :: ExprType }
-  | Distinct (Lang' t)
 type OpLang = OpLang' 'Flat
 deriving instance Eq OpLang
 deriving instance Ord OpLang
@@ -256,7 +255,7 @@ deriving instance Data OpLang
 instance TraverseP OpLang' where
     traverseP _ (Opaque s) = pure $ Opaque s
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
-    traverseP f (Unpack a b c) = Unpack <$> f a <*> pure b <*> f c
+    traverseP f (Unpack a b c) = Unpack <$> traverseP f a <*> pure b <*> f c
     traverseP f (Let v e b) = Let v <$> traverseP f e <*> f b
     traverseP f (Group a c) = Group a <$> f c
     traverseP f (HasType r a b) = HasType r <$> f a <*> pure b
@@ -307,6 +306,7 @@ instance Pretty ExprType where
     pretty LocalTy = "<HigherOrder>"
 instance Pretty BOp where
     pretty Eql = "=="
+    pretty And = "&&"
     pretty Mult = "*"
 instance Pretty AggrOp where
     pretty SumT = "SUM"
@@ -323,13 +323,14 @@ instance Pretty Expr where
     pretty (Tuple es) = tupled (map pretty es)
     pretty (AThunk a) = pretty a
     pretty (Nest a) = "Nest" <+> pretty a
-    pretty (Pack a) = tupled (map pretty a)
     pretty (HasEType Inferred e ty) = parens $ pretty e <+> ":::" <+> pretty ty
     pretty (HasEType _ e ty) = pretty e <+> "::" <+> pretty ty
-    pretty (Lookup v e) = pretty v <+> brackets (pretty e)
+    pretty (Lookup v e) = pretty v <> pretty e
     pretty (Lit i) = pretty i
 instance Pretty Lang where
-    pretty (Bind a b c) = group $ nest 2 $ "for" <+> pretty b <+> "in" <+> align (pretty a) <+> "{" <> nest 2 (line <> pretty c) </> "}"
+    pretty (Bind a b c) = nest 4 $ group $ "for" <+> pretty b <+> "in" <+> optParens (align (pretty a)) <+> "{" <> (line <> pretty c) </> "}"
+      where
+        optParens d = group $ flatAlt ("("<> line) space <> align d <> flatAlt (line <> ")") space
     pretty (LRef v) = "*" <> pretty v
     pretty (Filter p c) = "when" <+> parens (pretty p) <+> pretty c
     pretty (AsyncBind lets bod) = group $ ("async" <+> align (startEndSep open close sep [maybe "" (\x -> pretty x <> " ") op <> pretty k <+> "=" <+> pretty v | (k,op, v) <- lets])) </> pretty bod
@@ -363,11 +364,6 @@ instance Pretty a => Pretty (TopLevel' a) where
         prettyVars [] = mempty
         prettyVars vs = list (map pretty vs)
 
-prettyS :: Pretty a => a -> String
-prettyS = renderString . layoutPretty defaultLayoutOptions . pretty
-
-pprint :: Pretty a => a -> IO ()
-pprint = putStrLn . prettyS
 
 -- FIXME: shouldn't abstract over toplevel vars into account.
 instance (Monad m) => MonadGlobals RecLang (StateT (TopLevel' Lang) m)  where
@@ -456,3 +452,13 @@ freeVarsQ = runQ (
  ||| recurse)
  where
    boundVars bound = S.fromList [v|(v,_,_) <-  bound]
+
+
+
+mapExpr :: (Expr -> Expr) -> Lang -> Lang
+mapExpr f = mapExpr' (Return . f)
+
+mapExpr' :: (Expr -> Lang) -> Lang -> Lang
+mapExpr' f (Return a) = f a
+mapExpr' f (Bind a v b) = Bind a v (mapExpr' f b)
+mapExpr' f a = runIdentity $ traverseP (pure . mapExpr' f) a

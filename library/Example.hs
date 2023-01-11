@@ -2,7 +2,7 @@
 module Example (main) where
 import Analysis (optPass, analyzeArity)
 import CoroutineTransform (doCoroutineTransform)
-import Rewrites (nestedToThunks, simpPass, dropInferred)
+import Rewrites (nestedToThunks, simpPass, dropInferred, lowerUnpack, compactVars, inlineLets, sinkBinds)
 import CompileQuery (toTopLevel, RecLang, TopLevel, pprint)
 import Test (testRetNested, testAgg)
 import HoistThunks (doLifting)
@@ -11,7 +11,7 @@ import Elaborator (elaborate)
 
 -- runTest :: RecLang -> TopLevel
 runTest :: RecLang -> TopLevel
-runTest =  simpPass . dropInferred . doCoroutineTransform . doLifting . simpPass . elaborate . nestedToThunks . optPass . toTopLevel
+runTest =  simpPass . inlineLets . sinkBinds . compactVars . lowerUnpack . simpPass . dropInferred . doCoroutineTransform . doLifting . elaborate . simpPass . nestedToThunks . optPass . toTopLevel
 -- runTest =  simpPass . nestedToThunks . optPass . toTopLevel
 -- runTest = simpPass . nestedToThunks . optPass . toTopLevel
 

@@ -132,9 +132,6 @@ tcExpr (Aggr op thunk) = do
   thunkTy <- tcThunk thunk
   outTy <- checkOp op thunkTy
   pure $ setEType (Aggr op thunk) outTy
-tcExpr (Pack args) = do
-   argTys <- traverse lookupVar args
-   pure $ setEType (Pack args) (TupleTyp argTys)
 tcExpr (AggrNested op t) = do
   sourceTy <- tcLang t
   oTy <- checkOp op (lTy sourceTy)
@@ -197,8 +194,8 @@ tcOpLang (Union a b) = do
    oTy <- unify (lTy a') (lTy b')
    pure $ HasType Inferred (OpLang $ Union a' b') oTy
 tcOpLang (Unpack l vs body) = do
-  l' <- tcLang l
-  case lTy l' of
+  l' <- tcExpr l
+  case nTy l' of
     TupleTyp tys -> do
       body' <- local (M.union (M.fromList [ (a,b) | (Just a, b) <- zipStrict vs tys])) (tcLang body)
       pure $ HasType Inferred (OpLang $ Unpack l' vs body') (lTy body')
@@ -251,6 +248,10 @@ checkEOp op lty rty = do
   case op of
     Eql -> do
       _ <- unify lty rty
+      pure boolTy
+    And -> do
+      _ <- unify lty boolTy
+      _ <- unify rty boolTy
       pure boolTy
     Mult -> do
       _ <- unify lty intTy

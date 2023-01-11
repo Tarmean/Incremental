@@ -1,8 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE DerivingVia #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE BlockArguments #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
 -- | Optimization passes for the query language
 module Rewrites where
 
@@ -21,6 +23,10 @@ import Data.Semigroup (Max(..))
 import Data.Coerce (Coercible, coerce)
 import Control.Monad.Reader (MonadReader, ReaderT)
 import Data.Bifunctor (second)
+import Control.Monad.Reader.Class
+import Debug.Trace (traceM)
+import Control.Lens (traverseOf, each, _1)
+import Data.Maybe (fromMaybe)
 
 
 tagWithFrees :: TopLevel -> TopLevel
@@ -71,9 +77,6 @@ withVarGenT i = flip evalStateT i . runVarGenT
 withVarGenT' :: Int -> VarGenT m a -> m (a, Int)
 withVarGenT' i = flip runStateT i . runVarGenT
 
--- calcArity :: 
-
-
 type LiftFuns m = StateT (M.Map Fun ([Local], Lang)) (VarGenT m)
 
 maxVar :: Data a => a -> Int
@@ -120,20 +123,24 @@ hoistFilter :: Lang' t -> Maybe (Lang' t)
 hoistFilter (Bind (Filter g e) v e') = Just (Filter g (Bind e v e'))
 hoistFilter _ = Nothing
 
-trivPack :: Expr -> Maybe Expr
-trivPack (Pack [x]) = Just (Ref x)
-trivPack _ = Nothing
-
 projTuple :: Expr -> Maybe Expr
 projTuple (Proj i _ (Tuple ls)) = Just (ls !! i)
 projTuple _ = Nothing
 
+distinctUnit :: Lang -> Maybe Lang
+distinctUnit (OpLang (Distinct (Return u))) = Just (Return u)
+distinctUnit _ = Nothing
+
+
+filterFilter :: Lang -> Maybe Lang
+filterFilter (Filter p (Filter q s)) = Just (Filter (BOp And p q) s)
+filterFilter _ = Nothing
 
 simpPass :: Data a => a -> a
 simpPass = runIdentity . runT (
    recurse >>> (langRewrites ||| exprRewrites))
   where
-   langRewrites = tryTrans (useFirst [bindGuardT, bindUnitT, bindRightUnitT, callThunk, hoistFilter]) ||| tryTransM bindLeftUnitT ||| tryTransM bindBindT
+   langRewrites = tryTrans (useFirst [bindGuardT, bindUnitT, bindRightUnitT, callThunk, hoistFilter, filterFilter, distinctUnit]) ||| tryTransM bindLeftUnitT ||| tryTransM bindBindT
    exprRewrites = tryTrans $ useFirst [ projTuple ]
    useFirst = ala First mconcat
 
@@ -146,12 +153,13 @@ ala _cons folder args = coerce out
      (<&>) fs a= ($ a) <$> fs
     
 
-subst :: Var -> Expr -> Lang -> Lang
-subst v sub = runIdentity . runT (
-    tryTrans (\case
-       (Ref v'::Expr) | v == v' -> Just sub
+substVarT :: Applicative m => M.Map Var Expr -> Trans m
+substVarT m = tryTrans_ @Expr (\case
+       (Ref v) | Just sub <- m M.!? v -> Just sub
        _ -> Nothing)
-    -- |||
+subst :: Data a =>  Var -> Expr -> a -> a
+subst v sub = runIdentity . runT (
+    substVarT (M.singleton v sub)
     -- tryTrans (\case
     --    (LRef v'::Lang) | v == v' -> Just sub
     --    _ -> Nothing)
@@ -197,6 +205,92 @@ dropInferred = runT' (
          (HasEType Inferred e _) -> Just e
          _ -> Nothing
   )
+
+
+sinkBinds :: Data a => a -> a
+sinkBinds = runT' (tryTrans_ sinkBindsT ||| recurse)
+sinkBindsT :: Lang' 'Flat -> Maybe Lang
+sinkBindsT (Bind e v (Return r)) = Just $ mapExpr' (\x -> OpLang $ Let v x (Return r)) e
+sinkBindsT _ = Nothing
+
+
+lowerUnpack :: Data a => a -> a
+lowerUnpack = runT' (recurse >>> lowerUnpackT)
+lowerUnpackT :: Applicative m => Trans m
+lowerUnpackT = tryTrans_ @Lang \case
+    OpLang (Unpack l vs r) -> Just (
+      let total = length vs
+          proj = [OpLang . Let v (Proj i total l) | (i, Just v) <- zip [0..] vs]
+      in foldl (flip ($)) r proj)
+    _ -> Nothing
+
+compactVars :: Data a => a -> a
+compactVars =  flip evalState mempty . withVarGenT 0  . runT compactVarsT
+
+compactVarsT :: (MonadVar m, MonadState (M.Map Var Var) m) => Trans m
+compactVarsT
+  =   block (freshGlobalVar ||| recurse)
+  >>> block (freshLocalBinder ||| lookupRenamedVar ||| recurse)
+ where
+  freshGlobalVar = tryTransM_ @Source \(Source v) -> Just (Source <$> refreshVar v)
+  freshLocalBinder
+     =  tryTransM @Lang (\rec -> \case
+         Bind expr var body -> Just $ do
+              expr' <- rec expr
+              locally do
+                  var' <- refreshVar var
+                  body' <- rec body
+                  pure (Bind expr' var' body')
+         AsyncBind binders body -> Just $ do
+              binders <- rec binders
+              locally $ do
+                  binders <- traverseOf (each . _1) refreshVar binders
+                  body' <- rec body
+                  pure (AsyncBind binders body')
+         _ -> Nothing)
+    ||| tryTransM @OpLang (\rec -> \case
+         Let var expr body -> Just $ do
+              expr' <- rec expr
+              locally do
+                  var' <- refreshVar var
+                  body' <- rec body
+                  pure (Let var' expr' body')
+         _ -> Nothing)
+  lookupRenamedVar
+     = tryTransM_ @Lang \case
+         LRef r -> Just $ gets (LRef . (M.! r))
+         _ -> Nothing
+     ||| tryTransM_ @Expr \case
+          Ref r -> Just $ gets (Ref . (M.! r))
+          _ -> Nothing
+  refreshVar v = do
+     gets (M.!? v) >>= \case
+       Nothing -> do
+         v' <- genVar (name v)
+         modify (M.insert v v')
+         pure v'
+       Just v' -> pure v' 
+locally :: (MonadState s m) => m a -> m a
+locally m = do
+  old <- get
+  a <- m
+  put old
+  pure a
+
+inlineLets :: Data a => a -> a
+inlineLets = flip evalState mempty . runT (
+  tryTransM @Lang (\rec -> \case
+     OpLang (Let v expr body) -> Just $ do
+         expr <- rec expr
+         modify (M.insertWithKey (\k _ _ -> error ("key collision " <> show k)) v expr)
+         rec body
+     _ -> Nothing)
+  |||
+   tryTransM_ @Expr (\case
+     Ref v -> Just $ fromMaybe (Ref v) <$> gets (M.!? v)
+     _ -> Nothing)
+  ||| recurse)
+
 
 dropTopLevel :: TopLevel' p -> TopLevel' p
 dropTopLevel a = a { defs = M.map dropDefs (defs a) }
