@@ -7,11 +7,13 @@ import CompileQuery (toTopLevel, RecLang, TopLevel, pprint)
 import Test (testRetNested, testAgg)
 import HoistThunks (doLifting)
 import Elaborator (elaborate)
+import UnduplicateGrouping (renameLookup)
+import UnpackStructs (unpackStructs, mergeSlices)
 
 
 -- runTest :: RecLang -> TopLevel
 runTest :: RecLang -> TopLevel
-runTest =  simpPass . inlineLets . sinkBinds . compactVars . lowerUnpack . simpPass . dropInferred . doCoroutineTransform . doLifting . elaborate . simpPass . nestedToThunks . optPass . toTopLevel
+runTest =   mergeSlices . dropInferred . unpackStructs . elaborate . simpPass .  renameLookup . inlineLets . sinkBinds . compactVars . lowerUnpack . simpPass . dropInferred . doCoroutineTransform . doLifting . elaborate . simpPass . nestedToThunks . optPass . toTopLevel
 -- runTest =  simpPass . nestedToThunks . optPass . toTopLevel
 -- runTest = simpPass . nestedToThunks . optPass . toTopLevel
 

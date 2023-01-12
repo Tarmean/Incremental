@@ -20,7 +20,6 @@ import qualified Data.Map.Lazy as LM
 import Data.Reify
 import GHC.IO (unsafePerformIO)
 import Prettyprinter
-import Prettyprinter.Render.String (renderString)
 import GHC.Stack.Types (HasCallStack)
 import OpenRec
 import Data.List (intersperse)
@@ -86,6 +85,7 @@ data Expr' (p::Phase) where
     Ref :: Var -> Expr' p
     AThunk :: Thunk -> Expr' p
     Proj :: Int -> Int -> (Expr' p) -> Expr' p
+    Slice :: Int -> Int -> (Expr' p) -> Expr' p
     BOp :: BOp -> Expr' p -> Expr' p -> Expr' p
     Unit :: Expr' p
     Tuple :: [Expr' p] -> Expr' p
@@ -111,6 +111,7 @@ instance TraverseP Expr'  where
    traverseP _ (Ref a) = pure (Ref a)
    traverseP _ (AThunk a) = pure $ AThunk a
    traverseP f (Proj i tot e) = Proj i tot <$> traverseP f e
+   traverseP f (Slice l r e) = Slice l r <$> traverseP f e
    traverseP f (BOp op a b) = BOp op <$> traverseP f a <*> traverseP f b
    traverseP _ Unit = pure Unit
    traverseP f (Tuple es) = Tuple <$> traverse (traverseP f) es
@@ -125,7 +126,7 @@ instance TraverseP Expr'  where
 data AggrOp = SumT | MinT | MaxT
   deriving (Eq, Ord, Show, Data)
 type Expr = Expr' 'Flat
-data ExprType = TupleTyp [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep
+data ExprType = TupleTyp [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep  | TypeError ExprType ExprType
   deriving (Eq, Ord, Show, Typeable)
 intTy :: ExprType
 intTy = EBase (typeRep (Proxy :: Proxy Int))
@@ -142,9 +143,11 @@ instance Data ExprType where
     gfoldl k z (SourceTy v) = z SourceTy `k` v
     gfoldl _ z RootTy = z RootTy
     gfoldl _ z LocalTy = z LocalTy
+    gfoldl k z (TypeError a b) = z TypeError `k` a `k` b
 
     gunfold k z c
       = case constrIndex c of
+        7 -> k (k (z TypeError))
         6 -> z LocalTy
         5 -> z RootTy
         4 -> k (z SourceTy)
@@ -160,11 +163,12 @@ instance Data ExprType where
     toConstr SourceTy {} = eSourceTyConstr
     toConstr RootTy {} = eRootTyConstr
     toConstr LocalTy {} = eLocalTyConstr
+    toConstr TypeError {} = eTypeError
 
     dataTypeOf _ = exprTypeDataType
 
 eSourceTyConstr :: Constr
-eBaseConstr, eListTypeConstr, eTupleConstr, eRootTyConstr, eLocalTyConstr, eUnificationVarConstr :: Constr
+eBaseConstr, eListTypeConstr, eTupleConstr, eRootTyConstr, eLocalTyConstr, eUnificationVarConstr, eTypeError :: Constr
 eBaseConstr = mkConstr exprTypeDataType "EBase" [] Prefix
 eListTypeConstr = mkConstr exprTypeDataType "AnyType" [] Prefix
 eUnificationVarConstr = mkConstr exprTypeDataType "UnificationVar" [] Prefix
@@ -172,8 +176,9 @@ eTupleConstr = mkConstr exprTypeDataType "Tuple" [] Prefix
 eSourceTyConstr = mkConstr exprTypeDataType "SourceTy" [] Prefix
 eRootTyConstr = mkConstr exprTypeDataType "RootTy" [] Prefix
 eLocalTyConstr = mkConstr exprTypeDataType "LocalTy" [] Prefix
+eTypeError = mkConstr exprTypeDataType "TypeError" [] Prefix
 exprTypeDataType :: DataType
-exprTypeDataType = mkDataType "ExprType" [eTupleConstr, eListTypeConstr, eUnificationVarConstr, eSourceTyConstr, eRootTyConstr, eLocalTyConstr]
+exprTypeDataType = mkDataType "ExprType" [eTupleConstr, eListTypeConstr, eUnificationVarConstr, eSourceTyConstr, eRootTyConstr, eLocalTyConstr, eTypeError]
 
 newtype Uniq = Uniq Int
   deriving (Eq, Show, Ord, Data)
@@ -242,7 +247,7 @@ data OpLang' (t::Phase)
   | Union (Lang' t) (Lang' t)
   | Unpack { unpack :: Expr' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
-  | Group { groupBy :: AggrOp, groupBody :: Lang' t }
+  | Group { groupBy :: [AggrOp], groupBody :: Lang' t }
   | Call { nestedCall :: Expr' t }
   | Distinct (Lang' t)
   | Force { thunked :: Thunk }
@@ -303,6 +308,7 @@ instance Pretty ExprType where
     pretty (SourceTy o) = pretty o
     pretty (UnificationVar uv) = "UV<" <> pretty uv <> ">"
     pretty RootTy = "RootTy"
+    pretty (TypeError a b) = "TypeError<" <> pretty a <> "," <> pretty b <> ">"
     pretty LocalTy = "<HigherOrder>"
 instance Pretty BOp where
     pretty Eql = "=="
@@ -315,6 +321,7 @@ instance Pretty AggrOp where
 instance Pretty Expr where
     pretty (Ref t) = pretty t
     pretty (Proj i _ e) = pretty e <> "." <> pretty i
+    pretty (Slice l r e) = pretty e <> "[" <> pretty l <> ":" <> pretty l<> "+" <>pretty r <> "]"
     pretty (BOp op e1 e2) = pretty e1 <+> pretty op <+> pretty e2
     pretty Unit = "()"
     pretty (Aggr op v) = pretty op <> "(" <>  pretty v <> ")"

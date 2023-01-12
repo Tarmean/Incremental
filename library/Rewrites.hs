@@ -21,10 +21,9 @@ import OpenRec
 import Data.Functor.Identity
 import Data.Semigroup (Max(..))
 import Data.Coerce (Coercible, coerce)
-import Control.Monad.Reader (MonadReader, ReaderT)
+import Control.Monad.Reader (ReaderT)
 import Data.Bifunctor (second)
 import Control.Monad.Reader.Class
-import Debug.Trace (traceM)
 import Control.Lens (traverseOf, each, _1)
 import Data.Maybe (fromMaybe)
 
@@ -136,12 +135,22 @@ filterFilter :: Lang -> Maybe Lang
 filterFilter (Filter p (Filter q s)) = Just (Filter (BOp And p q) s)
 filterFilter _ = Nothing
 
+trivialRepack :: Expr -> Maybe Expr
+trivialRepack (Tuple (Proj 0 i e:ls))
+  | all isRepack (zip [1..] ls) = Just e
+  where
+    isRepack (j,Proj k i' e')
+      | j == k && i == i' && e == e' = True
+    isRepack _ = False
+trivialRepack _ = Nothing
+  
+
 simpPass :: Data a => a -> a
 simpPass = runIdentity . runT (
    recurse >>> (langRewrites ||| exprRewrites))
   where
-   langRewrites = tryTrans (useFirst [bindGuardT, bindUnitT, bindRightUnitT, callThunk, hoistFilter, filterFilter, distinctUnit]) ||| tryTransM bindLeftUnitT ||| tryTransM bindBindT
-   exprRewrites = tryTrans $ useFirst [ projTuple ]
+   langRewrites = tryTrans (useFirst [bindGuardT, bindUnitT, bindRightUnitT, callThunk, hoistFilter, filterFilter,  distinctUnit]) ||| tryTransM bindLeftUnitT ||| tryTransM bindBindT
+   exprRewrites = tryTrans $ useFirst [ projTuple , trivialRepack ]
    useFirst = ala First mconcat
 
 
