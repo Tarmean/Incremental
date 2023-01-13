@@ -5,6 +5,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE BlockArguments #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# LANGUAGE ViewPatterns #-}
 -- | Optimization passes for the query language
 module Rewrites where
 
@@ -219,8 +220,24 @@ dropInferred = runT' (
 sinkBinds :: Data a => a -> a
 sinkBinds = runT' (tryTrans_ sinkBindsT ||| recurse)
 sinkBindsT :: Lang' 'Flat -> Maybe Lang
-sinkBindsT (Bind e v (Return r)) = Just $ mapExpr' (\x -> OpLang $ Let v x (Return r)) e
+sinkBindsT (Bind e v (dropType -> (Return r))) = Just $ go  e
+  where
+    go (Bind e v e') = Bind e v (go e')
+    go (Filter g e) = Filter g (go e)
+    go (Return e) = OpLang $ Let v e (Return r)
+    go (AsyncBind vs e') = AsyncBind vs (go e')
+    go (OpLang (Union a b)) = OpLang $ Union (go a) (go b)
+    go (OpLang (Let v r b)) = OpLang $ Let v r (go b)
+    go (OpLang (Unpack e vs b)) = OpLang $ Unpack e vs (go b)
+    go (OpLang (HasType inf b ty)) = OpLang $ HasType inf (go b) ty
+    go (OpLang (Distinct b)) = OpLang $ Distinct (go b)
+    -- go e = error ("Unhandled " <> show e)
+    go e = Bind e v (Return r)
 sinkBindsT _ = Nothing
+
+dropType :: Lang' 'Flat -> Lang' 'Flat
+dropType (OpLang (HasType _ e _)) = dropType e
+dropType e = e
 
 
 lowerUnpack :: Data a => a -> a

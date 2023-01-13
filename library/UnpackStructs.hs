@@ -7,6 +7,7 @@ import CompileQuery
 import OpenRec
 import qualified Data.Map.Strict as M
 import Data.Data (Data)
+import Data.Maybe (fromMaybe)
 
 
 -- | Calculate how many columns a type consumes
@@ -19,15 +20,25 @@ widthOfType argCount (ListTy source _) = case source of
    _ -> error "Invalid listTy"
 widthOfType _ e = error ("wrong kind in widthOfType: " <> prettyS e)
 
+flattenType :: [ExprType] -> [ExprType]
+flattenType ls = concatMap go ls
+  where
+    go (TupleTyp ls) = concatMap go ls
+    go a = [a]
+
 projToSlice :: (Source -> Int) -> Expr -> Maybe Expr
-projToSlice _ (Proj 0 1 e) = Just $ e
-projToSlice env (Proj field _total (HasEType _ expr (TupleTyp tys))) = Just $ Slice offset width expr
+-- projToSlice _ (Proj 0 1 e) = Just $ e
+projToSlice env (Proj field _total (HasEType _ expr (TupleTyp tys)))
+  | resultIsTuple = Just $ Slice offset width (length (flattenType tys)) expr
   where
     (l,x) = case splitAt field tys of
         (l, x:_) -> (l,x)
         _ -> undefined
     offset = sum (map (widthOfType env) l)
     width = widthOfType env x
+    resultIsTuple = case tys !! field of
+      TupleTyp {} -> True
+      _ -> False
 projToSlice _ _ = Nothing
 
 
@@ -37,8 +48,32 @@ unpackStructs tl = runT' (tryTrans_ (projToSlice env) ||| recurse) tl
     env x = length $ fst $ defs tl M.! x
 
 mergeSlice :: Expr -> Maybe Expr
-mergeSlice (Slice i _ (Slice k l e)) = Just $ Slice (i+k) l e
+mergeSlice (Slice i _ total (Slice k l _ e)) = Just $ Slice (i+k) l total e
+mergeSlice (Slice i _ total (Proj k _ e)) = Just $ Proj (i+k) total e
+mergeSlice (Proj i _ (Slice off _ total e)) = Just $ Proj (i+off) total e
 mergeSlice _ = Nothing
 
+flattenTuple :: Expr -> Maybe Expr
+flattenTuple (Tuple ls)
+  | any isTuple ls = Just $ Tuple (concatMap go ls)
+  where
+    go (Tuple ls) = concatMap go ls
+    go (Slice from to total ls) = [Proj i total ls | i <- [from..from+to-1]]
+    go a = [a]
+    isTuple (Tuple {}) = True
+    isTuple (Slice {}) = True
+    isTuple _ = False
+flattenTuple _ = Nothing
+
+refToSlice  :: Expr -> Maybe Expr
+refToSlice (HasEType _ (Ref r) (TupleTyp tys)) = Just $ Slice 0 width width (Ref r)
+  where
+    width = sum (map (widthOfType (const 0)) tys)
+refToSlice _ = Nothing
+
+dropTyp  :: Expr -> Maybe Expr
+dropTyp (HasEType _ r _) = Just r
+dropTyp _ = Nothing
+
 mergeSlices :: Data a => a -> a
-mergeSlices = runT' (recurse >>> tryTrans_ mergeSlice)
+mergeSlices = runT' (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ flattenTuple &&& tryTrans_ mergeSlice )))

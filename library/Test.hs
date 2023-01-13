@@ -1,99 +1,100 @@
 {-# LANGUAGE QualifiedDo #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Redundant M.pure" #-}
 -- | Some test queries
 module Test where
-import qualified MonadSyntax as M
+import qualified TypedDSL as T
 import CompileQuery
-import Control.Arrow (Arrow(second))
-import Data.Functor.Identity (Identity(..))
 
 
-table :: String -> [ExprType] -> RecLang
-table s tys = OpLang (HasType Given (OpLang (Opaque s)) (ListTy RootTy $ TupleTyp tys))
+table :: String -> [ExprType] -> T.DSL [a]
+table s tys = T.ALang $ OpLang (HasType Given (OpLang (Opaque s)) (ListTy RootTy $ TupleTyp tys))
 
-userTable :: RecLang
-userTable = table "user" [intTy]
-barTable :: RecLang
-barTable = table "bar" [intTy]
-fooTable :: RecLang
-fooTable = table "foo" [intTy]
-testQ :: RecLang
-testQ = M.do
+userTable :: T.DSL [(Int, String)]
+userTable = table "user" [intTy, stringTy]
+barTable :: T.DSL [(Int, Int)]
+barTable = table "bar" [intTy, intTy]
+fooTable :: T.DSL [(Int, String)]
+fooTable = table "foo" [intTy, stringTy]
+testQ :: T.DSL [Int]
+testQ = T.do
    a <- userTable
    _ <- testQ
-   M.return a
+   T.return a._1
   
-testRetNested :: RecLang
+-- testRetNested :: RecLang
+testRetNested :: T.DSL [(Int, (Int, Int))]
 testRetNested = sec
   where
-    first = M.do
+    first = T.do
        a <- userTable
-       M.return (Tuple [a, nest $ M.do
-            b <- barTable
-            guards (a .== b)
-            M.return b])
-    sec = M.do
+       T.return (a, barTable)
+    sec = T.do
         m <- first
-        n <- first
-        b <- OpLang $ Union (iter (Proj 1 2 m)) (iter (Proj 1 2 n))
-        M.return (Tuple [Proj 0 2 m, b])
+        b <- m._2
+        T.return (m._1._1, b)
    
-testAgg :: RecLang
-testAgg = Bind (users_in_group (Lit $ StrLit "mygroup")) (Var 0 "y") (Return $ usage (Ref (Var 0 "y")))
+testAgg :: T.DSL [(String, Int)]
+testAgg = T.do
+    y <- users_in_group "mygroup"
+    T.pure (y._2, usage y._1)
   where
-    jobTable :: RecLang
-    jobTable = table "job" [intTy, intTy, intTy, intTy]
-    userGroupsTable :: RecLang
-    userGroupsTable = table "userGroups" [intTy, intTy]
-    groupsTable :: RecLang
-    groupsTable = table "userGroups" [stringTy, intTy]
-    usage user_id = AggrNested SumT $ M.do
+
+    usage user_id = T.sum $ T.do
         a <- jobTable
-        guards (Proj 0 4 a .== user_id)
-        M.return (BOp Mult (Proj 1 4 a) (Proj 2 4 a) )
-    users_in_group group = OpLang $ Distinct $ M.do
+        T.guard (a._1 T.==. user_id)
+        T.return (a._2 * a._3)
+    users_in_group group = T.distinct $ T.do
        u <- userTable
        ug <- userGroupsTable
        g <- groupsTable
-       guards (Proj 0 2 ug .== Proj 0 1 u)
-       guards (Proj 1 2 ug .== Proj 1 2 g)
-       guards (group .== Proj 0 2 g)
-       M.pure (Proj 0 1 u)
+       T.guard (ug._1 T.==. u._1)
+       T.guard (ug._2 T.==. g._2)
+       T.guard (group T.==. g._1)
+       T.pure u
 
-testFlat :: RecLang
-testFlat = M.do
-   let a = userTable
-   _ <- a
-   _ <- a
-   o <- barTable
-   M.pure o
+    jobTable :: T.DSL [(Int, Int, Int, Int)]
+    jobTable = table "job" [intTy, intTy, intTy, intTy]
+    userGroupsTable :: T.DSL [(Int, Int)]
+    userGroupsTable = table "userGroups" [intTy, intTy]
+    groupsTable :: T.DSL [(String, Int)]
+    groupsTable = table "userGroups" [stringTy, intTy]
 
-testLeftNest :: RecLang
-testLeftNest = M.do
-   M.do
-       _ <- userTable
-       fooTable
-   M.pure (nest barTable)
+-- -- testFlat :: RecLang
+-- -- testFlat = M.do
+-- --    let a = userTable
+-- --    _ <- a
+-- --    _ <- a
+-- --    o <- barTable
+-- --    M.pure o
 
-testRightNest :: RecLang
-testRightNest = M.do
-   a <- userTable
-   let
-    b = AggrNested SumT $ M.do
-       f <- fooTable
-       guards (a .== f)
-       M.pure (Proj 0 2 f)
-   M.pure (Tuple [a, b])
-guards :: Expr' 'Rec -> RecLang
-guards e = Filter e (Return Unit)
+-- -- testLeftNest :: RecLang
+-- -- testLeftNest = M.do
+-- --    M.do
+-- --        _ <- userTable
+-- --        fooTable
+-- --    M.pure (nest barTable)
 
-nest = Nest
-iter = OpLang . Call
+-- -- testRightNest :: RecLang
+-- -- testRightNest = M.do
+-- --    a <- userTable
+-- --    let
+-- --     b = AggrNested SumT $ M.do
+-- --        f <- fooTable
+-- --        guards (a .== f)
+-- --        M.pure (Proj 0 2 f)
+-- --    M.pure (Tuple [a, b])
+-- -- guards :: Expr' 'Rec -> RecLang
+-- -- guards e = Filter e (Return Unit)
 
--- view :: Expr' 'Rec -> [Expr' 'Rec]
--- view (Tuple ls) = [Proj i l | (i,l) <- zip [0..] ls]
--- view a = error ("view: " ++ prettyS (toTopLevel $ Return a))
-fail _ = undefined
+-- -- nest = Nest
+-- -- iter = OpLang . Call
+
+-- -- -- view :: Expr' 'Rec -> [Expr' 'Rec]
+-- -- -- view (Tuple ls) = [Proj i l | (i,l) <- zip [0..] ls]
+-- -- -- view a = error ("view: " ++ prettyS (toTopLevel $ Return a))
+-- -- fail _ = undefined

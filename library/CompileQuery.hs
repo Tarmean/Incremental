@@ -85,7 +85,7 @@ data Expr' (p::Phase) where
     Ref :: Var -> Expr' p
     AThunk :: Thunk -> Expr' p
     Proj :: Int -> Int -> (Expr' p) -> Expr' p
-    Slice :: Int -> Int -> (Expr' p) -> Expr' p
+    Slice :: Int -> Int -> Int -> (Expr' p) -> Expr' p
     BOp :: BOp -> Expr' p -> Expr' p -> Expr' p
     Unit :: Expr' p
     Tuple :: [Expr' p] -> Expr' p
@@ -111,7 +111,7 @@ instance TraverseP Expr'  where
    traverseP _ (Ref a) = pure (Ref a)
    traverseP _ (AThunk a) = pure $ AThunk a
    traverseP f (Proj i tot e) = Proj i tot <$> traverseP f e
-   traverseP f (Slice l r e) = Slice l r <$> traverseP f e
+   traverseP f (Slice l r tot e) = Slice l r tot <$> traverseP f e
    traverseP f (BOp op a b) = BOp op <$> traverseP f a <*> traverseP f b
    traverseP _ Unit = pure Unit
    traverseP f (Tuple es) = Tuple <$> traverse (traverseP f) es
@@ -320,8 +320,8 @@ instance Pretty AggrOp where
     pretty MaxT = "MAX"
 instance Pretty Expr where
     pretty (Ref t) = pretty t
-    pretty (Proj i _ e) = pretty e <> "." <> pretty i
-    pretty (Slice l r e) = pretty e <> "[" <> pretty l <> ":" <> pretty l<> "+" <>pretty r <> "]"
+    pretty (Proj i _tot e) = pretty e <> "." <> pretty i
+    pretty (Slice l r _total e) = pretty e <> "[" <> pretty l <> ":" <> pretty l<> "+" <>pretty r <> "]"
     pretty (BOp op e1 e2) = pretty e1 <+> pretty op <+> pretty e2
     pretty Unit = "()"
     pretty (Aggr op v) = pretty op <> "(" <>  pretty v <> ")"

@@ -49,8 +49,8 @@ resolveLookup source = do
    pure (grouped, fromJust (elemIndex op allOps), length allOps)
 
 
-renameLookup :: TopLevel -> TopLevel
-renameLookup tl = runIdentity $ withVarGenT (maxVar tl) $ do
+mergeGroupingOps :: TopLevel -> TopLevel
+mergeGroupingOps tl = runIdentity $ withVarGenT (maxVar tl) $ do
     let env = gatherEnv tl
     groupLabels <- generateGroupLabels env
     tl <- evalStateT (runT renameLookupT tl) (env,groupLabels)

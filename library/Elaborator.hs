@@ -21,6 +21,7 @@ import Data.Foldable (traverse_)
 import Data.Data (Data)
 import OpenRec
 import Prettyprinter (Pretty, pretty)
+import UnpackStructs (flattenType)
 
 -- for now, only do nonrecursive definitions via an implicit topo sort
 elaborate :: TopLevel -> TopLevel
@@ -171,10 +172,10 @@ tcExprW l@(Lookup source _) = do
    origin <- freshUVar
    _ <- unify sourceTy (ListTy origin (TupleTyp [keyTy, valTy]))
    pure $ hasEType l valTy
-tcExprW (Slice l r tuple) = do
+tcExprW (Slice l r total tuple) = do
    tuple <- tcExpr tuple
    case nTy tuple of
-      TupleTyp ls -> pure $ hasEType (Slice l r tuple) (TupleTyp (slice l r ls))
+      TupleTyp ls -> pure $ hasEType (Slice l r total tuple) (TupleTyp (slice l r (flattenType ls)))
       _ -> error "Illegal Slice"
 
 slice :: Int -> Int -> [a] -> [a]
@@ -324,10 +325,14 @@ unify = go
         Just l -> go l r
     go l (UnificationVar v) = go (UnificationVar v) l
     go (ListTy k l) (ListTy k' r) = ListTy <$> go k k' <*> go l r
-    go (TupleTyp l) (TupleTyp r) = TupleTyp <$> (zipStrict l r & traverse (uncurry go))
+    go (TupleTyp l) (TupleTyp r) 
+      | length l == length r = TupleTyp <$> (zipStrict l r & traverse (uncurry go))
     go l r 
       | l == r = pure l
-      | otherwise = throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack <> "\nctx: " <> prettyS (l,r))
+      | otherwise = pure r
+      | otherwise = do
+        ctx <- gets lastContext
+        throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack <> "\nctx: " <> prettyS (l,r, ctx))
 
 
 uLookup :: Int -> M (Maybe ExprType)
