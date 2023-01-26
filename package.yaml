@@ -33,6 +33,8 @@ library:
   - unordered-containers
   - lens
   - ghc-prim
+  - generic-lens
+  - transformers
   source-dirs: library
 
 executables:
