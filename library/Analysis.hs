@@ -20,34 +20,11 @@ import Data.Functor.Identity (Identity(runIdentity))
 import Data.Maybe (fromMaybe)
 
 
-newtype MonoidMap k v = MonoidMap { unMonoidMap :: M.Map k v }
-  deriving (Show, Eq, Ord, Data)
-instance (Ord k, Semigroup v) => Semigroup (MonoidMap k v) where
-  MonoidMap a <> MonoidMap b = MonoidMap $ M.unionWith (<>) a b
-instance (Ord k, Semigroup v) => Monoid (MonoidMap k v) where
-  mempty = MonoidMap M.empty
-
-instance (Pretty k,Pretty v) => Pretty  (MonoidMap k v) where
-  pretty (MonoidMap m) = pretty "fromList" <> align (pretty (M.toList m))
--- Collect usage info for var binders.
-class Monoid a => Mult a where
-  -- | `mone` is identity, `mempty` is zero
-  -- Distributes over `mappend`
-  infixl 7 .*
-  (.*) :: a -> a -> a
-  mone :: a
-
-class Monoid a => Alt a where
-  -- | forms a lattice with mone as top and mempty as bottom
-  -- Distributes over `mappend`
-  infixr 5 .||
-  (.||) :: a -> a -> a
-instance Alt Usage where
-  (.||) = max
-
-instance (Ord k, Alt v) => Alt (MonoidMap k v) where
-   (.||) (MonoidMap a) (MonoidMap b) = MonoidMap $   M.unionWith (.||) a b
-
+-- | Composes a recursive analysis
+-- - What are the results for all terms?
+-- - What other terms does the current one refer to?
+--
+-- We search a fixpoint @f(e) + sum(f(t) for t in free_vars(e))@
 transitive1 :: (Show k, Show a, HasCallStack, Ord k,Alt a, Mult a) => M.Map k (M.Map k a) -> M.Map k a -> M.Map k a
 transitive1 m direct = out
   where
@@ -251,3 +228,31 @@ dropUnused m tl = tl {
     isUnused x = x `S.member` unused || M.notMember x (unMonoidMap m)
     out = M.filterWithKey (\k _ -> not $ isUnused (unSource k)) (defs tl)
 
+
+newtype MonoidMap k v = MonoidMap { unMonoidMap :: M.Map k v }
+  deriving (Show, Eq, Ord, Data)
+instance (Ord k, Semigroup v) => Semigroup (MonoidMap k v) where
+  MonoidMap a <> MonoidMap b = MonoidMap $ M.unionWith (<>) a b
+instance (Ord k, Semigroup v) => Monoid (MonoidMap k v) where
+  mempty = MonoidMap M.empty
+
+instance (Pretty k,Pretty v) => Pretty  (MonoidMap k v) where
+  pretty (MonoidMap m) = pretty "fromList" <> align (pretty (M.toList m))
+-- Collect usage info for var binders.
+class Monoid a => Mult a where
+  -- | `mone` is identity, `mempty` is zero
+  -- Distributes over `mappend`
+  infixl 7 .*
+  (.*) :: a -> a -> a
+  mone :: a
+
+class Monoid a => Alt a where
+  -- | forms a lattice with mone as top and mempty as bottom
+  -- Distributes over `mappend`
+  infixr 5 .||
+  (.||) :: a -> a -> a
+instance Alt Usage where
+  (.||) = max
+
+instance (Ord k, Alt v) => Alt (MonoidMap k v) where
+   (.||) (MonoidMap a) (MonoidMap b) = MonoidMap $   M.unionWith (.||) a b

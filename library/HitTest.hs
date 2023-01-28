@@ -41,6 +41,8 @@ sybChildren :: Data a => a -> [DataBox]
 sybChildren x
   | isAlgType dt = do
     c <- dataTypeConstrs dt
+    -- FIXME: This throws for strict constructors
+    -- which probably makes this strictly worse than using the constr information directly
     gmapQ dataBox (fromConstr c `asTypeOf` x)
   | otherwise = []
   where dt = dataTypeOf x
@@ -99,7 +101,7 @@ readCacheFollower b@(DataBox kb _) ka = inlinePerformIO $
   readIORef cache >>= \ (Cache hm m) -> case M.lookup kb m >>= M.lookup ka of
     Just a -> return a
     Nothing -> E.try (return $! insertHitMap b hm) >>= \case
-      Left err@E.SomeException{}                         -> error (show err) -- atomicModifyIORef cache $ \(Cache hm' n) -> (Cache hm' (insert2 kb ka Nothing n), Nothing)
+      Left err@E.SomeException{}                         -> error (show err <>", in type " <> show kb) -- atomicModifyIORef cache $ \(Cache hm' n) -> (Cache hm' (insert2 kb ka Nothing n), Nothing)
       Right hm' | fol <- Just (follower kb ka hm') -> atomicModifyIORef cache $ \(Cache _ n) -> (Cache hm' (insert2 kb ka fol n),    fol)
 
 insert2 :: TypeRep -> HashSet TypeRep -> a -> HashMap TypeRep (HashMap (HashSet TypeRep) a) -> HashMap TypeRep (HashMap (HashSet TypeRep) a)

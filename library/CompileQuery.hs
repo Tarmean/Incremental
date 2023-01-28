@@ -21,6 +21,7 @@ import Data.Reify
 import GHC.IO (unsafePerformIO)
 import Prettyprinter
 import GHC.Stack.Types (HasCallStack)
+import GHC.Generics (Generic)
 import OpenRec
 import Data.List (intersperse)
 import Util
@@ -242,8 +243,13 @@ instance TraverseP Lang' where
     traverseP _ (FBind _ _) = undefined -- FBind <$> (traverseP f l) <*> (traverseP f . g)
 data TypeStrictness = Inferred | Given
   deriving (Eq, Ord, Show, Data)
+
+data TableMeta = TableMeta { fundeps :: FunDeps, fields :: [String] }
+  deriving (Show, Eq, Ord, Data, Generic)
+newtype FunDeps = FD [[String]]
+  deriving (Show, Eq, Ord, Data, Generic)
 data OpLang' (t::Phase)
-  = Opaque String
+  = Opaque String TableMeta
   | Union (Lang' t) (Lang' t)
   | Unpack { unpack :: Expr' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
@@ -258,7 +264,7 @@ deriving instance Ord OpLang
 deriving instance Show OpLang
 deriving instance Data OpLang
 instance TraverseP OpLang' where
-    traverseP _ (Opaque s) = pure $ Opaque s
+    traverseP _ (Opaque s m) = pure $ Opaque s m
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
     traverseP f (Unpack a b c) = Unpack <$> traverseP f a <*> pure b <*> f c
     traverseP f (Let v e b) = Let v <$> traverseP f e <*> f b
@@ -349,7 +355,7 @@ instance Pretty Lang where
     pretty (Return e) = "yield" <+> pretty e
     pretty (OpLang o) = pretty o
 instance Pretty OpLang where
-    pretty (Opaque s) = "#" <> pretty s
+    pretty (Opaque s _) = "#" <> pretty s
     pretty (Union a b) = "Union" <+> group (align (pretty a </> pretty b))
     pretty (Unpack a v c) = group $ "let"<+> align (align (mkTuple (map (maybe "_" pretty) v)) <> softline <> "=" <+> pretty a) </> "in" <+> pretty c
       where

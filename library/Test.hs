@@ -1,6 +1,7 @@
 {-# LANGUAGE QualifiedDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
@@ -10,9 +11,8 @@ module Test where
 import qualified TypedDSL as T
 import CompileQuery
 
-
 table :: String -> [ExprType] -> T.DSL [a]
-table s tys = T.ALang $ OpLang (HasType Given (OpLang (Opaque s)) (ListTy RootTy $ TupleTyp tys))
+table s tys = T.ALang $ OpLang (HasType Given (OpLang (Opaque s (TableMeta (FD []) []))) (ListTy RootTy $ TupleTyp tys))
 
 userTable :: T.DSL [(Int, String)]
 userTable = table "user" [intTy, stringTy]
