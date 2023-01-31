@@ -67,7 +67,9 @@ allow-newer: true
 #
 # Extra directories used by stack for building
 # extra-include-dirs: [/path/to/dir]
-# extra-lib-dirs: [/path/to/dir]
+
+# Horrifying hack to fix https://gitlab.haskell.org/ghc/ghc/-/issues/21111
+extra-lib-dirs: [C:/Users/Cyril/AppData/Local/Programs/stack/x86_64-windows/ghc-9.2.4/mingw/x86_64-w64-mingw32/lib/]
 #
 # Allow a newer minor version of GHC than the snapshot specifies
 # compiler-check: newer-minor

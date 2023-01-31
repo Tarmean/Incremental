@@ -1,8 +1,31 @@
--- {-# OPTIONS_GHC -dsuppress-coercions -ddump-prep -fforce-recomp -O2 #-}
+-- {-# OPTIONS_GHC -dsuppress-coercions -ddump-simpl -fforce-recomp -O2 #-}
+-- | Demand analysis
+--
+-- Given some code, we want to know how often free variables are used. This is a range such as:
+--
+-- Absent: used 0 times
+-- Linear: 1 times
+-- Strict: 1-n times
+-- Maybe(Affine): 0-1 times
+-- Lazy(Unknown): 0-n times
+--
+-- This part is pretty easy.
+-- But! We want this knowledge not just for e.g. function arguments, but also for their fields. This way we can only pass the required fields, which is a huge deal.
+--
+-- We must do this analysis accross function boundaries which makes it difficult. The core trick is to match producers with consumers:
+--
+-- - Producing a struct may require different ressources for each field. Instead of merging this information into a flat set we can store a list of demands, one for each field.
+-- - When we pattern-match, we can map the matched variables to the sub-demands.
+--
+-- GHC uses a cryptic short-notation for demands. 1P(L,ML) means:
+-- - We have a struct of two fields which is always pattern-matched once
+-- - The first fields is used 0-n times
+-- - The second field is used 0-1 times, and its sub-fields are used 0-n times
+--
 module DemandAnalysis (bar) where
 import Data.Data (Data)
 import qualified Data.Map.Strict as M
-import CompileQuery (Var)
+import CompileQuery (Var(..))
 import qualified Data.Set as S
 import Control.Monad.State (StateT)
 import Rewrites (VarGenT, MonadVar (genVar))
@@ -19,23 +42,49 @@ data PatTree = Node Id [PatTree]
   deriving (Eq, Ord, Show, Data)
 type Id = String
 
-
+ -- Str=<1P(LP(L),MP(L))>
 {-# NOINLINE bar #-}
 bar :: (Int,Int) -> (Int,Int)
 bar (a,b) = (a*2,a+b)
+
+
+
 --
--- bar :: a@(b,c) :-> a+(b, b+c)
+-- bar : t
+-- t ~ l -> r
+-- l ~ (b,c)
+-- b ~ I# c
+-- d ~ I# e
+-- r ~ &l + '(&b+c + 'I# _, &b+c+&d+e + 'I# _)
+--
+-- 1(L,L)
+--
+--
+-- f . g
+-- f : a -> b
+-- g : b -> c
+--
+-- fst : (a,b) -> a
+--
+-- fst . bar : l@(b@(I# c),_) -> &l+&b+c + '(I# _)
+
+--- first :: (a -> b) -> (a,c) -> (b,c)
+--  first : f@(a -> b) -> l@(c,d) -> (l+f c, l+d)
 
 data Core
-  = Lambda String Core
+  = Lambda Var Core
   | Core :@ Core
-  | Ref Id
+  | Ref Var
   | Tup [Core]
   | Proj Int Int Core
   | Const String
   deriving (Eq, Ord, Show, Data)
+
+varA,varB :: Var
+varA =  Var 0 "a"
+varB =  Var 1 "b"
 fooC :: Core
-fooC = Lambda "a" (Const "+" :@ (Const "fst" :@ Ref "a") :@ (Const "fst" :@ Ref "a"))
+fooC = Lambda varA (Const "+" :@ (Const "fst" :@ Ref varA) :@ (Const "fst" :@ Ref varA))
 
 type M = VarGenT (State (M.Map Id Demand))
 toDemandF :: Core -> M Demand
@@ -49,7 +98,22 @@ toDemandF (Proj i n l) = do
   -- toDemandF l
   -- v :+ TupleD ls -> v +:+ (ls !! i)
   -- v :+ d -> v :+ ProjD i d
-toDemandF (Ref d :@ a) =  undefined
+toDemandF w@(:@) {} =  go w []
+  where
+    go (ls :@ a) acc = do
+       a <- toDemandF a
+       go ls (a : acc)
+    go (Ref f) acc = pure $ [] :+ (DApp f acc)
+    go a acc = do
+       o <- toDemandF a
+       v <- genVar "s"
+       tellEq v o
+       pure $ [] :+ DApp v acc
+toDemandF (Const a) = undefined
+toDemandF (Lambda v a) = (Node v [] :->) <$> toDemandF a
+
+tellEq :: Var -> Demand -> VarGenT (State (M.Map Id Demand)) a0
+tellEq = undefined
 
 unifyD :: DemandF -> DemandF -> M ()
 unifyD = undefined
@@ -61,12 +125,12 @@ unifyD = undefined
 data DemandF
   = PatTree :-> Demand -- ^ Function call demand
   | TupleD [Demand] -- ^ Tuple whose fields have demands
-  | DApp Var [DemandF]
+  | DApp Var [Demand]
   | DRef Var
   | Top
   | Bot
   deriving (Eq, Ord, Show, Data)
-data Demand = [Id] :+ DemandF
+data Demand = [Var] :+ DemandF
   deriving (Eq, Ord, Show, Data)
 
 -- -- | Merge sequential demands
