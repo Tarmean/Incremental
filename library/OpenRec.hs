@@ -114,7 +114,7 @@ l ||| r = T relevantTypes containsRecursion trans
     containsRecursion = toplevelRecursion l <> toplevelRecursion r
     trans :: Ctx m -> Trans1 m
     trans ctx = withCtx l (ctx { onFailure = withCtx r ctx })
-infixl 1 |||
+infixr 1 |||
 
 -- | Sequential composition of transformations
 -- In @a >>> b@, we only run @b@ if @a@ succeeds.
@@ -125,7 +125,7 @@ l >>> r = T relevantTypes containsRecursion trans
     containsRecursion = toplevelRecursion l
     trans :: Ctx m -> Trans1 m
     trans ctx = withCtx l ctx{ onSuccess = withCtx r ctx }
-infixl 1 >>>
+infixr 1 >>>
 
 
 -- | Definite composition of transformations
@@ -137,7 +137,7 @@ l &&& r = T relevantTypes containsRecursion trans
     containsRecursion = toplevelRecursion l <> toplevelRecursion r
     trans :: Ctx m -> Trans1 m
     trans ctx = withCtx l ctx{ onSuccess = withCtx r ctx, onFailure = withCtx r ctx }
-infixl 1 &&&
+infixr 1 &&&
 
 -- | Core recursion operator
 -- Usually, we either want top down recursion

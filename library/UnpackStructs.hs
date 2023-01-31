@@ -55,15 +55,18 @@ mergeSlice _ = Nothing
 
 flattenTuple :: Expr -> Maybe Expr
 flattenTuple (Tuple ls)
-  | any isTuple ls = Just $ Tuple (concatMap go ls)
+  | any isTuple ls = Just $ Tuple (concatMap flattenExprList ls)
   where
-    go (Tuple ls) = concatMap go ls
-    go (Slice from to total ls) = [Proj i total ls | i <- [from..from+to-1]]
-    go a = [a]
     isTuple (Tuple {}) = True
     isTuple (Slice {}) = True
     isTuple _ = False
 flattenTuple _ = Nothing
+flattenExprList :: Expr -> [Expr]
+flattenExprList = go
+  where
+    go (Tuple ls) = concatMap go ls
+    go (Slice from to total ls) = [Proj i total ls | i <- [from..from+to-1]]
+    go a = [a]
 
 refToSlice  :: Expr -> Maybe Expr
 refToSlice (HasEType _ (Ref r) (TupleTyp tys)) = Just $ Slice 0 width width (Ref r)
@@ -76,4 +79,30 @@ dropTyp (HasEType _ r _) = Just r
 dropTyp _ = Nothing
 
 mergeSlices :: Data a => a -> a
-mergeSlices = runT' (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ flattenTuple &&& tryTrans_ mergeSlice )))
+mergeSlices = runT' (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ updateGroup &&& tryTrans_ flattenTuple &&& tryTrans_ flattenLookupArgs &&& tryTrans_ flattenOps &&& tryTrans_ mergeSlice )))
+
+updateGroup :: OpLang -> Maybe OpLang
+updateGroup (Group l _ k (OpLang (HasType _ e (ListTy _ (TupleTyp ls))))) = Just (Group widthL widthR k e)
+  where
+    (tyL, tyR) = splitAt l ls
+    widthL = sum (map (widthOfType (const 0)) tyL)
+    widthR = sum (map (widthOfType (const 0)) tyR)
+updateGroup _ = Nothing
+
+flattenLookupArgs :: Expr -> Maybe Expr
+flattenLookupArgs (Lookup sym args) = Just $ Lookup sym (concatMap flattenExprList args)
+flattenLookupArgs _ = Nothing
+
+flattenOps :: Expr -> Maybe Expr
+flattenOps (BOp Eql l r)
+  | Just len <- shouldSplit l
+  = Just $ Tuple [BOp Eql (tryMergeSlice $ Proj i len l) (tryMergeSlice $ Proj i len r) | i <- [0..len-1]]
+  where
+    tryMergeSlice a = fromMaybe a (mergeSlice a)
+    shouldSplit (HasEType _ _ ty) = case ty of
+      (TupleTyp l) -> Just (length l)
+      _ -> Nothing
+    shouldSplit (Tuple l) = Just $ length l
+    shouldSplit (Slice _ t _ _) = Just t
+    shouldSplit _ = Nothing
+flattenOps _ = Nothing

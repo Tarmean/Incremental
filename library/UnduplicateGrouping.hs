@@ -27,7 +27,7 @@ gatherEnv tl = Env backwards forwards
     backwards = M.fromList [ (lhs, (Source rhs, op)) | (lhs, ([], OpLang g@Group {})) <- M.toList $ defs tl, let (rhs,op) = validGroup g ]
     forwards = M.fromListWith (<>) [ (rhs, [op]) | (rhs, op) <- M.elems backwards ]
 
-    validGroup (Group [op] (LRef ref)) = (ref, op)
+    validGroup (Group _ _ [op] (LRef ref)) = (ref, op)
     validGroup g = error ("Invalid group in gatherEnv. Did you run it immediately after the coroutine transform? " <> prettyS g)
 
 
@@ -58,7 +58,7 @@ mergeGroupingOps tl = runIdentity $ withVarGenT (maxVar tl) $ do
       newGroups = M.fromList do
           (k,ops) <- M.toList (groupingForwards env)
           let newName = groupLabels M.! k
-          pure (newName, ([], OpLang $ Group ops (LRef $ unSource k)))
+          pure (newName, ([], OpLang $ Group 1 1 ops (LRef $ unSource k)))
     pure tl { defs = M.union newGroups (defs tl M.\\ groupingBackwards env) }
 
 renameLookupT :: Trans M

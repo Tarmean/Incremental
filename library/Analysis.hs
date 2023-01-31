@@ -203,11 +203,11 @@ outMultiplicity env (Filter _ f) = outMultiplicity env f
 outMultiplicity env (LRef f) = M.findWithDefault Many (Source f) env
 outMultiplicity env (AsyncBind _ a) = outMultiplicity env a
 outMultiplicity env (OpLang l) = case l of
-  Opaque _ -> Many
+  Opaque {} -> Many
   Union a b -> outMultiplicity env a <> outMultiplicity env b
   Unpack _ _ b -> outMultiplicity env b
   Let _ _ b -> outMultiplicity env b
-  Group _ _ -> Once
+  Group {} -> Once
   Call _ -> Once
   Force (Thunk t _) -> M.findWithDefault Many t env
   HasType _ t _ -> outMultiplicity env t

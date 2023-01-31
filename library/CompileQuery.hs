@@ -253,7 +253,7 @@ data OpLang' (t::Phase)
   | Union (Lang' t) (Lang' t)
   | Unpack { unpack :: Expr' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
-  | Group { groupBy :: [AggrOp], groupBody :: Lang' t }
+  | Group { keyLen :: Int, valLen :: Int, groupBy :: [AggrOp], groupBody :: Lang' t }
   | Call { nestedCall :: Expr' t }
   | Distinct (Lang' t)
   | Force { thunked :: Thunk }
@@ -268,7 +268,7 @@ instance TraverseP OpLang' where
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
     traverseP f (Unpack a b c) = Unpack <$> traverseP f a <*> pure b <*> f c
     traverseP f (Let v e b) = Let v <$> traverseP f e <*> f b
-    traverseP f (Group a c) = Group a <$> f c
+    traverseP f (Group k k' a c) = Group k k' a <$> f c
     traverseP f (HasType r a b) = HasType r <$> f a <*> pure b
     traverseP f (Call b) = Call <$> traverseP f b
     traverseP f (Distinct b) = Distinct <$> f b
@@ -363,7 +363,7 @@ instance Pretty OpLang where
        mkTuple [a] = "(" <> a <> ",)"
        mkTuple as = tupled as
     pretty (Let v e b) = "let" <+> pretty v <+> ":=" <+> pretty e <> flatAlt line " in " <> pretty b
-    pretty (Group op body) = group $ "group" <> parens (pretty op) <+> pretty body
+    pretty (Group l r op body) = group $ "group" <> tupled [pretty l, pretty r] <>  parens (pretty op) <+> pretty body
     pretty (HasType Inferred e t) = parens $ pretty e <+> ":::" <+> pretty t
     pretty (HasType _ e t) = pretty e <+> "::" <+> pretty t
     pretty (Call e) = "?" <> pretty e

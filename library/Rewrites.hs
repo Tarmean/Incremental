@@ -6,6 +6,7 @@
 {-# LANGUAGE BlockArguments #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeFamilies #-}
 -- | Optimization passes for the query language
 module Rewrites where
 
@@ -27,6 +28,8 @@ import Data.Bifunctor (second)
 import Control.Monad.Reader.Class
 import Control.Lens (traverseOf, each, _1)
 import Data.Maybe (fromMaybe)
+import Debug.Trace (traceM)
+
 
 
 tagWithFrees :: TopLevel -> TopLevel
@@ -318,6 +321,22 @@ inlineLets = flip evalState mempty . runT (
   ||| recurse)
 
 
+workWrap :: Source -> [Var] -> Lang -> Lang
+workWrap src args body = out
+  where
+    out = expandFunArgs (S.fromList args) body
+workerWrapper :: TopLevel -> TopLevel
+workerWrapper = undefined
+
+expandFunArgs :: (Data a) => S.Set Var -> a -> a
+expandFunArgs args = runT'
+ ( recurse >>>
+  tryTrans_ @Expr \case
+   HasEType _ (Ref v) (TupleTyp ls)  | S.member v args -> Just (HasEType Inferred (Tuple [Proj i (length ls) (Ref v) | i <- [0..length ls -1]]) (TupleTyp ls))
+   _ -> Nothing
+ ||| tryTrans_ projTuple)
+
+
 dropTopLevel :: TopLevel' p -> TopLevel' p
 dropTopLevel a = a { defs = M.map dropDefs (defs a) }
   where
@@ -336,3 +355,26 @@ dropTopLevel a = a { defs = M.map dropDefs (defs a) }
     --     pure (Call f (zipWith (\v e -> BOp Eql (ValArg e) (ValArg (Ref v))) vs es))
 
 -- inlineReturns :: 
+
+lookupToLoop_ :: (Data a) => a -> a
+lookupToLoop_ a = runIdentity  . withVarGenT (maxVar a). lookupToLoop $ a
+lookupToLoop :: (Applicative m, Data a, MonadVar m) => a -> m a
+lookupToLoop a = do
+   (out, r) <- runWriterT (runT (tryTransM_ lowerLookup &&& (tryTransM insertBinds ||| recurse)) a)
+   case r of
+     [] -> pure out
+     _ -> error "Leftover lookup binders"
+insertBinds :: (Monad n, m ~ WriterT [(Source, Var, [Expr])] n, MonadVar m) => Trans1 m -> Lang -> Maybe (m Lang)
+insertBinds rec m = Just $ do
+   (s,w) <- lift $ runWriterT (OpenRec.gmapM rec m)
+   pure (foldl mkFloatedBinds s w)
+mkFloatedBinds :: Lang -> (Source, Var, [Expr]) -> Lang
+mkFloatedBinds r (Source k, v, e) = Bind (LRef k) v (filters e r)
+  where
+   filters ls = Filter (BOp Eql (Tuple ls) (Proj 0 2 (Ref v)))
+lowerLookup :: (MonadWriter [(Source, Var, [Expr])] m, MonadVar m) => Expr -> Maybe (m Expr)
+lowerLookup (Lookup k expr) = Just $ do
+  l <- genVar "l"
+  tell [(k, l, expr)]
+  pure (Proj 1 2 (Ref l))
+lowerLookup _ = Nothing

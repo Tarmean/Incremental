@@ -136,9 +136,9 @@ tcExprW (AThunk thunk) = do
    thunkTy <- tcThunk thunk
    pure $ setEType (AThunk thunk) thunkTy
 tcExprW (Proj i tot e) = do
-   e' <- tcExpr e
-   case nTy e' of
-      TupleTyp tys -> pure $ setEType (Proj i tot e') (tys !! i)
+   e <- tcExpr e
+   case nTy e of
+      TupleTyp tys -> pure $ setEType (Proj i tot e) (tys !! i)
       uv@UnificationVar {} -> do
          v <- replicateM tot freshUVar
          _ <- unify uv (TupleTyp v)
@@ -165,13 +165,14 @@ tcExprW (Nest n) = do
   sourceTy <- tcLang n
   uv <- freshUVar
   pure $ setEType (Nest n) (ListTy uv (lTy sourceTy))
-tcExprW l@(Lookup source _) = do
+tcExprW (Lookup source args) = do
    sourceTy <- lookupVar (unSource source)
+   args <- traverse tcExpr args
    keyTy <- freshUVar
    valTy <- freshUVar
    origin <- freshUVar
    _ <- unify sourceTy (ListTy origin (TupleTyp [keyTy, valTy]))
-   pure $ hasEType l valTy
+   pure $ hasEType (Lookup source args) valTy
 tcExprW (Slice l r total tuple) = do
    tuple <- tcExpr tuple
    case nTy tuple of
@@ -215,7 +216,7 @@ tcLangW (Return expr) = do
    setType (Return expr') (ListTy uv $ nTy expr')
 tcLangW (Filter expr body) = do
    expr' <- tcExpr expr
-   assert (nTy expr' == EBase (typeRep @Bool)) "tcLang: Filter on non-bool"
+   _ <- unify (nTy expr') boolTy
    body' <- tcLang body
    setType (Filter expr' body') (lTy body')
 tcLangW (LRef r) = do
@@ -226,7 +227,7 @@ tcLangW (AsyncBind {}) = error "tcLang: Not Unnested before typechecking"
 
 tcOpLang :: OpLang -> M OpLang
 tcOpLang w@(HasType {})= pure w
-tcOpLang (Opaque s) = throwError ("Untyped opaque: " <> show s)
+tcOpLang (Opaque s _) = throwError ("Untyped opaque: " <> show s)
 tcOpLang (Union a b) = do
    a' <- tcLang a
    b' <- tcLang b
@@ -254,15 +255,20 @@ tcOpLang w@(Force (Thunk sym _args)) = do
     symTy  <- lookupVar (unSource sym)
     ty' <- cleanSource symTy
     pure $ HasType Inferred (OpLang w) ty'
-tcOpLang (Group ops body) = do
+tcOpLang (Group keyLen valLen ops body) = do
+  -- uvars <- replicateM (keyLen+valLen) freshUVar
   body <- tcLang body
-  kty <- freshUVar
-  vty <- freshUVar
-  sourceTy <- freshUVar
-  _ <- unify (lTy body) (ListTy sourceTy (TupleTyp [kty, vty]))
-  outTys <- forM ops $ \op -> checkOp op (ListTy sourceTy vty)
   uv <- freshUVar
-  pure $ HasType Inferred (OpLang $ Group ops body) (ListTy uv $ TupleTyp [kty, TupleTyp outTys])
+  tv <- freshUVar
+  pure (HasType Inferred (OpLang (Group keyLen valLen ops body)) (ListTy uv tv))
+  -- sourceTy <- freshUVar
+  -- unify (lTy body) (ListTy sourceTy (TupleTyp uvars)) >>= \case
+  --   ListTy sourceTy (TupleTyp uvars) -> do
+  --     let (kty, vty) = splitAt keyLen uvars
+  --     outTys <- forM ops $ \op -> checkOp op (ListTy sourceTy (TupleTyp vty))
+  --     uv <- freshUVar
+  --     pure $ HasType Inferred (OpLang $ Group keyLen valLen ops body) (ListTy uv $ TupleTyp [TupleTyp kty, TupleTyp outTys])
+  --   _ -> error "Impossible"
   -- where
   --   mapTyKey :: ExprType -> M ExprType
   --   mapTyKey (ListTy _ (TupleTyp (a:_))) = pure a
@@ -329,7 +335,7 @@ unify = go
       | length l == length r = TupleTyp <$> (zipStrict l r & traverse (uncurry go))
     go l r 
       | l == r = pure l
-      | otherwise = pure r
+      -- | otherwise = pure l
       | otherwise = do
         ctx <- gets lastContext
         throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack <> "\nctx: " <> prettyS (l,r, ctx))

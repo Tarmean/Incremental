@@ -79,7 +79,7 @@ collect = M.toList . M.map S.toList . M.fromListWith (<>) . map (second S.single
 
 doAggregates :: Source -> [AggrOp] -> [(Source, ([a], Lang))]
 doAggregates (Source (Var i s)) aggs = [
-    (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group [agg] (LRef $ Var i s))) | agg <- aggs
+    (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group 1 1 [agg] (LRef $ Var i s))) | agg <- aggs
   ]
 
 loadInputs :: [Var] -> [(Source, [Projections])] -> Lang -> VarGenT Identity Lang

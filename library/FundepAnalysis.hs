@@ -124,17 +124,18 @@ aTest = ASPJ (SPJ {
         wheres = [],
         proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp SumO (Ref (Var 1 "J") "cost"))]
       }
-     aggrTable2 =
-      GroupQ [Ref (Var 1 "J") "user_id"] $
-      ASPJ SPJ {
-        sources = [(Var 1 "J", jobTable)],
-        wheres = [],
-        proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp MaxO (Ref (Var 1 "J") "cost"))]
-      }
+     -- aggrTable2 =
+     --  GroupQ [Ref (Var 1 "J") "user_id"] $
+     --  ASPJ SPJ {
+     --    sources = [(Var 1 "J", jobTable)],
+     --    wheres = [],
+     --    proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp MaxO (Ref (Var 1 "J") "cost"))]
+     --  }
 
 mkRef :: NId -> Var -> NId
 mkRef _self = ARef
 makeGraph :: NId -> SQL -> M ()
+makeGraph self (OrderBy _ spj) = makeGraph self spj
 makeGraph self (ASPJ spj) = do
     let isLocalSource k = any ((==k) . fst) spj.sources
     withLocals [(v, mkRef self v) | (v,_) <- spj.sources ] $ do
@@ -193,11 +194,3 @@ resolveLocal s = asks (M.findWithDefault (ARef s) s)
 (.-) :: NId -> [NId] -> M ()
 (.-) k v = do
   modify $ \s -> s { constraints = (k :- v) :constraints s }
-
-         
-
--- data FundepGraph = FG {
-    
-    
-
--- }
