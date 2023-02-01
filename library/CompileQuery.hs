@@ -232,7 +232,6 @@ asyncBindConstr = mkConstr langDataType "AsyncBind" [] Prefix
 langDataType :: DataType
 langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, asyncBindConstr]
 
-    
 instance TraverseP Lang' where
     traverseP f (Bind l v l') = Bind <$> f l <*> pure  v <*> f l'
     traverseP f (Filter e l) = Filter <$> traverseP f e <*> f l
