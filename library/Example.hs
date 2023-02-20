@@ -10,13 +10,14 @@ import Elaborator (elaborate)
 import UnduplicateGrouping (mergeGroupingOps)
 import UnpackStructs (unpackStructs, mergeSlices)
 import TypedDSL (coerceLang, DSL)
+import DemandAnalysisTransform (dropDeadArgs)
 
 
 -- runTest :: RecLang -> TopLevel
 
-runTest :: DSL [a] -> TopLevel
-runTest =  elaborate . simpPass . nestedToThunks . optPass . toTopLevel . coerceLang
--- runTest =  elaborate . dropInferred . mergeSlices . unpackStructs . elaborate . simpPass . mergeGroupingOps . inlineLets . sinkBinds . compactVars . lowerUnpack . simpPass . dropInferred . doCoroutineTransform . doLifting . elaborate . simpPass . nestedToThunks . optPass . toTopLevel . coerceLang
+-- runTest :: DSL [a] -> TopLevel
+-- runTest =  simpPass . dropInferred . doCoroutineTransform . dropDeadArgs . doLifting . elaborate . simpPass . nestedToThunks . optPass . toTopLevel . coerceLang
+runTest =  dropInferred . mergeSlices . unpackStructs . elaborate . simpPass . mergeGroupingOps . inlineLets . sinkBinds . compactVars . lowerUnpack . simpPass . dropInferred . doCoroutineTransform . dropDeadArgs . doLifting . elaborate . simpPass . nestedToThunks . optPass . toTopLevel . coerceLang
 
 -- runTest =  simpPass . nestedToThunks . optPass . toTopLevel
 -- runTest = simpPass . nestedToThunks . optPass . toTopLevel

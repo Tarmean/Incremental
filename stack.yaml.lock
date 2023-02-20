@@ -29,6 +29,26 @@ packages:
   original:
     commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
     git: https://github.com/Tarmean/data-reify.git
+- completed:
+    commit: 4d5239c1fb8181e8d92e3a6312ceb2eee3ef619a
+    git: https://github.com/sgraf812/datafix/
+    name: datafix
+    pantry-tree:
+      sha256: a0fcb46499bc1f0ef054edc5dd7c90fc7b90b813104c3d0abc53b73410ab46bf
+      size: 2867
+    subdir: datafix
+    version: 0.0.2.0
+  original:
+    commit: 4d5239c1fb8181e8d92e3a6312ceb2eee3ef619a
+    git: https://github.com/sgraf812/datafix/
+    subdir: datafix
+- completed:
+    hackage: pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948
+    pantry-tree:
+      sha256: 1f53c725e4d29ef41ad5b590658c3c48853f95d0789adf18bc563cd502cf65a7
+      size: 1036
+  original:
+    hackage: pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948
 snapshots:
 - completed:
     sha256: 5201b267da5c16bde723e0401eed332c96035edd55250a947089a7d9417b7ecc

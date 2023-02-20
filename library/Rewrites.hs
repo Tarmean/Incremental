@@ -15,6 +15,7 @@ import Control.Monad.Trans
 import Control.Monad.Trans.Elevator
 import Control.Monad.State.Strict
 import Control.Monad.Writer.Strict
+import Control.Monad.Cont
 import Data.Data
 import qualified Data.Set as S
 import qualified Data.Map.Lazy as LM
@@ -72,6 +73,7 @@ instance Monad m => MonadVar (VarGenT m) where
 deriving via Elevator (StateT s) m instance MonadVar m => MonadVar (StateT s m) 
 deriving via Elevator (WriterT s) m instance (Monoid s, MonadVar m) => MonadVar (WriterT s m) 
 deriving via Elevator (ReaderT s) m instance (MonadVar m) => MonadVar (ReaderT s m) 
+deriving via Elevator (ContT r) m instance (MonadVar m) => MonadVar (ContT r m) 
 instance (MonadTrans t, Monad (t m), MonadVar m) => MonadVar (Elevator t m) where
     genVar = lift . genVar
 withVarGenT :: Monad m => Int -> VarGenT m a -> m a
@@ -320,21 +322,6 @@ inlineLets = flip evalState mempty . runT (
      _ -> Nothing)
   ||| recurse)
 
-
-workWrap :: Source -> [Var] -> Lang -> Lang
-workWrap src args body = out
-  where
-    out = expandFunArgs (S.fromList args) body
-workerWrapper :: TopLevel -> TopLevel
-workerWrapper = undefined
-
-expandFunArgs :: (Data a) => S.Set Var -> a -> a
-expandFunArgs args = runT'
- ( recurse >>>
-  tryTrans_ @Expr \case
-   HasEType _ (Ref v) (TupleTyp ls)  | S.member v args -> Just (HasEType Inferred (Tuple [Proj i (length ls) (Ref v) | i <- [0..length ls -1]]) (TupleTyp ls))
-   _ -> Nothing
- ||| tryTrans_ projTuple)
 
 
 dropTopLevel :: TopLevel' p -> TopLevel' p

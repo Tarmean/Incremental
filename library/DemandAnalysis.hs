@@ -24,275 +24,178 @@
 --
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BlockArguments #-}
-module DemandAnalysis (bar) where
+{-# LANGUAGE OverloadedStrings #-}
+module DemandAnalysis  where
+import CompileQuery
 import Data.Data (Data)
 import qualified Data.Map.Strict as M
-import CompileQuery (Var(..))
-import qualified Data.Set as S
-import Control.Monad.State (StateT)
-import Rewrites (VarGenT, MonadVar (genVar), withVarGenT)
-import Control.Monad.State.Strict
-import Data.Functor.Identity (runIdentity)
-import Control.Applicative
-import Data.Either (partitionEithers)
-import OpenRec (runT', tryTrans_, (|||), recurse)
-import Data.Maybe (fromMaybe)
-
-{-# NOINLINE foo #-}
-foo :: (Int,Int) -> Int
-foo a = fst a + fst a
--- Node 0 [Node 1 [],Node 3 []] :-> [0,1] :+ TupleD [Top]
---
--- 0:@[1:@[], 2:@[]] :-> [0,1] :+ TupleD [Top]
-
-data PatTree = Node Id [PatTree]
-  deriving (Eq, Ord, Show, Data)
-type Id = String
-
- -- Str=<1P(LP(L),MP(L))>
-{-# NOINLINE bar #-}
-bar :: (Int,Int) -> (Int,Int)
-bar (a,b) = (a*2,a+b)
-
--- [\a -> e]p
--- [a]p~v1
--- v1 -> [e](p { a => without_hnf(v1), v1:hnf })
---
--- [c(a,b,c)]p
--- c([a]p, [b]p, [c]p)
--- 
--- [f a]p // by local copy
--- v1 ~ refresh_binders([f]p)
--- v2 ~ [a]p
--- v1 ~ v2 -> r
--- hnf(v1)+r
---
--- [f a]p // by global analysis
--- global(f) ~ l -> r
--- [a]p ~ l
--- r
---
--- [let x = e in b]p
--- v1 ~ [e]p
--- v2 ~ [b](p { x => without_hnf(v1), x:hnf(v1) })
---
--- [letrec x = e in b]p
--- v1 ~ [e](p { x => Ref l1, l1:v1 })
--- v2 ~ [b](p { x => Ref v1, l1:v1 })
---
--- [v]p if v is a variable
---p(v)
---
--- [case e of { c(v_1,...,v_n) -> e1 }]p
--- v1 ~ [e]p
--- v1 ~ (p_2,...,p_n)
--- v2 ~ [e1]{v_1 => p_2, ..., v_n => p_n}
--- hnf(e)+v2
---
--- [case e of { c(v_1,...,v_n) -> e1; c2(v_1,...v_m) -> e2;... }]p
--- v1 ~ [e]p
--- v1 ~ (c(p_1,...,p_n)|c2(p_1,...,p_m)|...)
--- v2 ~ [e1]{v_1 => p_2, ..., v_n => p_n}
--- v3 ~ [e2]{v_1 => p_2, ..., v_m => p_m}
--- v2 | v3
-
---
--- bar : t
--- t ~ l -> r
--- l ~ (b,c)
--- b ~ I# c
--- d ~ I# e
--- r ~ &l + '(&b+c + 'I# _, &b+c+&d+e + 'I# _)
---
--- 1(L,L)
---
---
--- f . g
--- f : a -> b
--- g : b -> c
---
--- fst : (a,b) -> a
---
--- fst . bar : l@(b@(I# c),_) -> &l+&b+c + '(I# _)
-
---- first :: (a -> b) -> (a,c) -> (b,c)
---  first : f@(a -> b) -> l@(c,d) -> (l+f c, l+d)
-
-data Pat = Pat Constr [Var]
-  deriving (Eq, Ord, Show, Data)
-data Core
-  = Lambda Var Core
-  | Core :@ Core
-  | Ref Var
-  | Struct Constr [Core]
-  | Case Core [(Pat,Core)]
-  | Lit String
-  deriving (Eq, Ord, Show, Data)
-
-varA,varB :: Var
-varA =  Var 0 "a"
-varB =  Var 1 "b"
-varC =  Var 2 "c"
-fooC :: Core
-fooC = Lambda varA (Case (Ref varA) [(Pat "Tuple2" [varB,varC], Struct "Tuple2" [Ref varC, Ref varB])])
-
-sumV :: Var
-sumV = Var 3 "sum"
-
-sumC :: Core
-sumC = Lambda varA (Case (Ref varA) [(Pat "ListCons" [varB,varC], Lit "+" :@ Ref varB :@ (Ref sumV :@ Ref varC)), (Pat "ListNil" [], Lit "0")])
+import Prettyprinter
 
 
-runDemand :: Core -> Demand
-runDemand c = runIdentity $ withVarGenT 0 (toDemandF c)
 
-type M = VarGenT (State (M.Map Var Demand))
-toDemandF :: MonadVar m => Core -> m Demand
-toDemandF (Ref f) = pure $ DRef f
-toDemandF (Struct constr ls) = Constructor constr <$> traverse toDemandF ls
-toDemandF (Case expr cases) = do
-  dexpr <- toDemandF expr
-  dcases <- forM cases $ \(Pat constr args,bod) -> do
-    vars <- traverse refreshVar args
-    dbod <- toDemandF bod
-    pure $ Unify dexpr (Constructor constr (map DRef vars)) &&& dbod
-  pure (dexpr &&& ors dcases)
-  
-  -- pure 
-  -- toDemandF l
-  -- v :+ TupleD ls -> v +:+ (ls !! i)
-  -- v :+ d -> v :+ ProjD i d
-toDemandF (l :@ r) =  DApp <$> toDemandF l <*> toDemandF r
-toDemandF (Lit _) = pure top
-toDemandF (Lambda v a) = (v :->) <$> toDemandF a
-
-refreshVar :: MonadVar m => Var -> m Var
-refreshVar (Var _ b) = genVar b
-
-(&&&) :: Demand -> Demand -> Demand
-(&&&) a b = Ands [a,b]
+data Demand = Tup [Demand] | NoInfo | NoneUsed | Each Demand deriving (Eq, Ord, Show, Data)
+each :: Demand -> Demand
+each NoInfo = NoInfo
+each NoneUsed = NoneUsed
+each d = Each d
+tup :: [Demand] -> Demand
+tup ls
+  | all (== NoInfo) ls = NoInfo
+  | all (== NoneUsed) ls = NoneUsed
+  | otherwise = Tup ls
 
 
-ors :: [Demand] -> Demand
-ors = Ors . concatMap flattenOrs
+class Lattice a where
+  (/\) :: a -> a -> a
+  (\/) :: a -> a -> a
+
+instance Lattice Demand where
+    (/\) :: Demand -> Demand -> Demand
+    (/\) NoneUsed a = a
+    (/\) a NoneUsed = a
+    (/\) (Each a) (Each b) = each (a /\ b)
+    (/\) NoInfo _ = NoInfo
+    (/\) _ NoInfo = NoInfo
+    (/\) (Tup a) (Tup b) = tup (zipWith (/\) a b)
+    (/\) _ _ = error "Invalid demand pair"
+
+    (\/) :: Demand -> Demand -> Demand
+    NoneUsed \/ NoneUsed = NoneUsed
+    (\/) (Tup a) (Tup b) = tup (zipWith (\/) a b)
+    (\/) (Tup a) NoneUsed = tup (map (NoneUsed \/) a)
+    (\/) NoneUsed (Tup a) = tup (map (NoneUsed \/) a)
+    (\/) (Each a) (Each b) = each (a /\ b)
+    (\/) NoneUsed (Each b) = each (NoneUsed \/ b)
+    (\/) (Each b) NoneUsed = each (NoneUsed \/ b)
+    _ \/ _ = NoInfo
+
+
+
+fixDemands :: TopLevel -> GlobalEnv
+fixDemands (TopLevel defs _root) = fixOut demands0
   where
-    flattenOrs (Ors ls) = concatMap flattenOrs ls
-    flattenOrs x = [x]
-
-unifyD :: Demand -> Demand -> M ()
-unifyD = undefined
-
-type Constr = String
--- | Demands for absence analysis
-data Demand
-  = Var :-> Demand -- ^ Function call demand
-  | Constructor Constr [Demand] -- ^ Tuple whose fields have demands
-  | DApp Demand Demand
-  | DRef Var
-  | Ors [Demand]
-  | Ands [Demand]
-  | Unify Demand Demand
-  deriving (Eq, Ord, Show, Data)
-
-top = Ands []
-bot = Ors []
-type Env = M.Map Var Demand
-
-unify :: (MonadState Env m, MonadVar m, Alternative m) => Demand -> Demand -> m Demand
-unify (DRef a) b = do
-  gets (M.!? a) >>= \case
-    Nothing -> modify (M.insert a b) >> pure b
-    Just a' -> unify a' b
-unify b (DRef a) = do
-  gets (M.!? a) >>= \case
-    Nothing -> modify (M.insert a b) >> pure b
-    Just a' -> unify b a'
-unify (Ors ls) r = do
-    l <- asum (map pure ls)
-    unify l r
-unify l (Ors rs) = do
-    r <- asum (map pure rs)
-    unify l r
-unify l (Ands rs) = do
-   let (as,bs) = splitUnifies rs
-   mapM_ (uncurry unify) as
-   bs' <- traverse (unify l) bs
-   pure (Ands bs')
-unify (Ands ls) r = do
-   let (as,bs) = splitUnifies ls
-   mapM_ (uncurry unify) as
-   bs' <- traverse (`unify` r) bs
-   pure (Ands bs')
-unify (l :-> le) (r :-> re) = do
-   v <- unify (DRef l) (DRef r)
-   let
-     o = case v of
-      DRef v' -> v'
-      _ -> undefined
-   e <- unify le re
-   pure (o :-> e)
-unify (Constructor l ls) (Constructor r rs) = do
-   guard (l == r)
-   let os = zipWith (&&&) ls rs
-   pure (Constructor l os)
-unify (DApp f arg) e = do
-    mkCall f arg >>= \case
-      Just o -> unify o e
-      Nothing -> pure $ Unify (DApp f arg) e
-unify e (DApp f arg) = do
-    mkCall f arg >>= \case
-      Just o -> unify e o
-      Nothing -> pure $ Unify e (DApp f arg)
-unify _ _ = empty
-
-substDemand :: Var -> Demand -> Demand -> Demand
-substDemand v sub = runT' (
-   tryTrans_ \case
-     DRef v' | v == v' -> Just sub
-     _ -> Nothing
-  ||| recurse)
+    demands0 = GlobalEnv $ M.fromList [(k,replicate (length args) NoneUsed) | (k,(args, _)) <- M.toList defs, not (null args)]
 
 
-resolve :: (MonadState Env m) => Demand -> m Demand
-resolve (DRef v) = gets (M.!? v) >>= \case
-  Nothing -> pure (DRef v)
-  Just o -> resolve o
-resolve (DApp f a) = fromMaybe (DApp f a) <$> mkCall f a
-resolve a = pure a
-mkCall :: (MonadState Env m) => Demand -> Demand -> m (Maybe Demand)
-mkCall f arg = do
-    resolve f >>= \case
-      (l :-> r) -> pure $ Just $ substDemand l r arg
-      _ -> pure Nothing
+    fixOut env
+      | env == env' = env
+      | otherwise = fixOut env'
+      where env' = fixOut1 env
+    fixOut1 :: GlobalEnv -> GlobalEnv
+    fixOut1 demandEnv = GlobalEnv $ flip M.mapWithKey (globalEnv demandEnv) $ \k _ ->
+        let
+            (args, body) = defs M.! k
+            DemandEnv dmd = calcDemandL demandEnv NoInfo body
+        in [M.findWithDefault NoneUsed arg dmd | arg <- args]
 
 
 
-splitUnifies :: [Demand] -> ([(Demand, Demand)],[Demand])
-splitUnifies ls = partitionEithers [ case x of
-  Unify a b -> Left (a,b)
-  _ -> Right x
-  | x <- ls]
+newtype DemandEnv = DemandEnv { demandEnv :: M.Map Var Demand }
+  deriving (Eq,Ord,Show)
 
--- normalize :: Demand -> Demand
--- normalize 
-normalformDemand :: Demand -> [Demand]
-normalformDemand (Ands ls) = Ands <$> traverse normalformDemand ls
-normalformDemand (Ors ls) = concatMap normalformDemand ls
-normalformDemand (Unify a b) = Unify <$> normalformDemand a <*> normalformDemand b
-normalformDemand (a :-> b) = (a :->) <$> normalformDemand b
-normalformDemand a = [a]
+instance Pretty Demand where
+   pretty NoneUsed = "0"
+   pretty (Each a) = "[" <> pretty a <> "]"
+   pretty (Tup a) = tupled (map pretty a)
+   pretty NoInfo = "?"
 
--- -- | Merge sequential demands
--- join :: Demand -> Demand -> Demand
--- join Absent d = d
--- join d Absent = d
--- join Used _ = Used
--- join _ Used = Used
--- join (ListD d1) (ListD d2) = ListD (join d1 d2)
--- join (TupleD ds1) (TupleD ds2) = TupleD (zipWith join ds1 ds2)
--- join _ _ = error "join: incompatible demands"
+instance Pretty GlobalEnv where
+   pretty (GlobalEnv m) = "GlobalEnv" <+> braces (vsep (map (\(k,v) -> pretty k <+> "->" <+> pretty v) (M.toList m)))
+newtype GlobalEnv = GlobalEnv { globalEnv :: M.Map Source [Demand] }
+  deriving (Eq,Ord,Show)
+
+analyseCall :: GlobalEnv -> Thunk -> DemandEnv
+analyseCall env (Thunk src args) = case M.lookup src (globalEnv env) of
+    Just demands -> DemandEnv (M.fromList (zip args demands))
+    Nothing -> DemandEnv (M.fromList (zip args (repeat NoInfo)))
+
+instance Lattice DemandEnv where
+    (/\) :: DemandEnv -> DemandEnv -> DemandEnv
+    (/\) (DemandEnv a) (DemandEnv b) = DemandEnv (M.unionWith (/\) a b)
+
+    (\/) :: DemandEnv -> DemandEnv -> DemandEnv
+    (\/) (DemandEnv a) (DemandEnv b) = DemandEnv (M.intersectionWith (\/) a b)
+
+botEnv :: DemandEnv
+botEnv = DemandEnv mempty
+
+calcDemand :: GlobalEnv -> Demand -> Expr -> DemandEnv
+calcDemand _ NoneUsed _ = botEnv
+calcDemand _ dmd (Ref v) = DemandEnv (M.singleton v dmd)
+calcDemand g dmd (Proj idx total ex) = calcDemand g dmd' ex
+  where
+    leftOf = idx
+    rightOf = (total-idx-1)
+    dmd' = tup (replicate leftOf NoneUsed ++ [dmd] ++ replicate rightOf NoneUsed)
+calcDemand g dmd (Slice offset len total ex) = calcDemand g dmd' ex
+  where
+    leftOf = offset
+    rightOf = total-offset-len
+    inner = case dmd of
+      Tup ds -> ds
+      NoInfo -> replicate len NoInfo
+      Each _ -> error "projection on list"
+    dmd' = tup (replicate leftOf NoneUsed ++ inner ++ replicate rightOf NoneUsed)
+calcDemand g dmd (Tuple ls) = foldr1 (/\) (zipWith (calcDemand g) dmds ls)
+  where
+    dmds = case dmd of
+      Tup ds -> ds
+      NoInfo -> NoInfo <$ ls
+      Each _ -> error "projection on list"
+calcDemand g dmd (BOp _ l r) = calcDemand g dmd l /\ calcDemand g dmd r
+calcDemand _ _ Unit = botEnv
+calcDemand g _ (AThunk t) = analyseCall g t
+calcDemand g _ (Aggr _ t) = analyseCall g t
+calcDemand g _ (AggrNested _ t) = calcDemandL g NoInfo t
+calcDemand g _ (Nest t) = calcDemandL g NoInfo t
+calcDemand g d (HasEType _ e _) = calcDemand g d e
+calcDemand _ _ (Lit {}) = botEnv
+calcDemand _ _ (Lookup {}) = error "Lookup should not exist yet during demand analysis; not implemented"
 
 
--- type Ana l = l -> Demand -> (DemandEnv, )
--- absenceAna :: Expr 
+calcDemandL :: GlobalEnv -> Demand -> Lang -> DemandEnv
+calcDemandL _ NoneUsed _ = botEnv
+calcDemandL g d (Bind bhead var bod) = bodEnv /\ headEnv
+  where
+    bodEnv = calcDemandL g d bod
+    bodDemand = case M.lookup var (demandEnv bodEnv) of
+      Just dmd -> each dmd
+      Nothing -> NoneUsed
+    headEnv = calcDemandL g bodDemand bhead
+calcDemandL g d (Filter p b) = calcDemand g d p /\ calcDemandL g d b
+calcDemandL g d (Return b) = case d of
+    Each dmd -> calcDemand g dmd b
+    _ -> calcDemand g NoInfo b
+calcDemandL _ d (LRef b) = DemandEnv (M.singleton b d)
+calcDemandL g d (AsyncBind ls b) = foldr1 (/\) [analyseCall g t | (_,_,t) <- ls] /\ calcDemandL g d b
+calcDemandL g d (OpLang l) = calcDemandOL g d l
+
+
+calcDemandOL :: GlobalEnv -> Demand -> OpLang -> DemandEnv
+calcDemandOL _ _ (Opaque {}) = botEnv
+calcDemandOL g d (Union l r) = calcDemandL g d l /\ calcDemandL g d r
+calcDemandOL g d (Let v exprHead bod) = bodEnv /\ headEnv
+  where
+    bodEnv = calcDemandL g d bod
+    headDemand = case M.lookup v (demandEnv bodEnv) of
+      Just dmd -> each dmd
+      Nothing -> NoneUsed
+    headEnv = calcDemand g headDemand exprHead
+calcDemandOL g d (Call t) = calcDemand g d t
+calcDemandOL g _ (Force t) = analyseCall g t
+calcDemandOL g d (Distinct t) = calcDemandL g d t
+calcDemandOL g d (Group kl vl _ t) = calcDemandL g (headDemand /\ d) t
+  where headDemand = each (tup (replicate kl NoInfo ++ replicate vl NoneUsed))
+calcDemandOL g d (HasType _ t _) = calcDemandL g d t
+calcDemandOL g d (Unpack uHead uBound bod) = envBod /\ calcDemand g (mkProjEnv envBod) uHead
+  where
+    envBod = calcDemandL g d bod
+    mkProjEnv :: DemandEnv -> Demand
+    mkProjEnv env = tup $ do
+        m <- uBound
+        case m of
+          Nothing -> [NoneUsed]
+          Just v -> case M.lookup v (demandEnv env) of
+            Just dmd -> [dmd]
+            Nothing -> [NoneUsed]
 

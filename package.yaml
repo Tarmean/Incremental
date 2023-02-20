@@ -35,6 +35,7 @@ library:
   - ghc-prim
   - generic-lens
   - transformers
+  - datafix
   source-dirs: library
 
 executables:
