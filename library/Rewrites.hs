@@ -26,6 +26,7 @@ import Data.Semigroup (Max(..))
 import Data.Coerce (Coercible, coerce)
 import Control.Monad.Reader (ReaderT)
 import Data.Bifunctor (second)
+import GHC.Stack (HasCallStack)
 import Control.Monad.Reader.Class
 import Control.Lens (traverseOf, each, _1)
 import Data.Maybe (fromMaybe)
@@ -143,7 +144,7 @@ filterFilter _ = Nothing
 
 trivialRepack :: Expr -> Maybe Expr
 trivialRepack (Tuple (Proj 0 i e:ls))
-  | all isRepack (zip [1..] ls) = Just e
+  | length ls == (i-1) && all isRepack (zip [1..] ls) = Just e
   where
     isRepack (j,Proj k i' e')
       | j == k && i == i' && e == e' = True
@@ -229,7 +230,7 @@ sinkBindsT (Bind e v (dropType -> (Return r))) = Just $ go  e
   where
     go (Bind e v e') = Bind e v (go e')
     go (Filter g e) = Filter g (go e)
-    go (Return e) = OpLang $ Let v e (Return r)
+    go (Return e) = subst v e (Return r)
     go (AsyncBind vs e') = AsyncBind vs (go e')
     go (OpLang (Union a b)) = OpLang $ Union (go a) (go b)
     go (OpLang (Let v r b)) = OpLang $ Let v r (go b)
@@ -289,10 +290,10 @@ compactVarsT
          _ -> Nothing)
   lookupRenamedVar
      = tryTransM_ @Lang \case
-         LRef r -> Just $ gets (LRef . (M.! r))
+         LRef r -> Just $ gets (LRef . (!!! r))
          _ -> Nothing
      ||| tryTransM_ @Expr \case
-          Ref r -> Just $ gets (Ref . (M.! r))
+          Ref r -> Just $ gets (Ref . (!!! r))
           _ -> Nothing
   refreshVar v = do
      gets (M.!? v) >>= \case
@@ -301,6 +302,8 @@ compactVarsT
          modify (M.insert v v')
          pure v'
        Just v' -> pure v' 
+(!!!) :: (HasCallStack, Ord k, Show k) => M.Map k v -> k -> v
+m !!! k = fromMaybe (error $ "Missing Key " ++ show k) (M.lookup k m)
 locally :: (MonadState s m) => m a -> m a
 locally m = do
   old <- get

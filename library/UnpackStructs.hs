@@ -53,6 +53,10 @@ mergeSlice (Slice i _ total (Proj k _ e)) = Just $ Proj (i+k) total e
 mergeSlice (Proj i _ (Slice off _ total e)) = Just $ Proj (i+off) total e
 mergeSlice _ = Nothing
 
+sliceToTuple :: Lang -> Maybe Lang
+sliceToTuple (Return (Slice k l t e)) = Just $ Return (Tuple [Proj (k+i) t e | i <- [0..l-1]])
+sliceToTuple _ = Nothing
+
 flattenTuple :: Expr -> Maybe Expr
 flattenTuple (Tuple ls)
   | any isTuple ls = Just $ Tuple (concatMap flattenExprList ls)
@@ -79,7 +83,9 @@ dropTyp (HasEType _ r _) = Just r
 dropTyp _ = Nothing
 
 mergeSlices :: Data a => a -> a
-mergeSlices = runT' (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ updateGroup &&& tryTrans_ flattenTuple &&& tryTrans_ flattenLookupArgs &&& tryTrans_ flattenOps &&& tryTrans_ mergeSlice )))
+mergeSlices = runT' $ do
+    block (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ updateGroup &&& tryTrans_ flattenTuple &&& tryTrans_ flattenLookupArgs &&& tryTrans_ flattenOps &&& tryTrans_ mergeSlice )))
+    >>> block (tryTrans_ sliceToTuple ||| recurse)
 
 updateGroup :: OpLang -> Maybe OpLang
 updateGroup (Group l _ k (OpLang (HasType _ e (ListTy _ (TupleTyp ls))))) = Just (Group widthL widthR k e)
