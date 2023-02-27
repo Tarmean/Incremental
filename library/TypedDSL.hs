@@ -67,11 +67,11 @@ instance (HasNoDSL a) => Inj (DSL a) where
 instance  Inj String where
   inj = fromString
 instance (Inj a, Inj b) => Inj (a, b) where
-  inj (a, b) = AnExpr $ Tuple [coerceExpr $ inj a, coerceExpr $ inj b]
+  inj (a, b) = AnExpr $ tuple [coerceExpr $ inj a, coerceExpr $ inj b]
 instance (Inj a, Inj b, Inj c) => Inj (a, b, c) where
-  inj (a, b, c) = AnExpr $ Tuple [coerceExpr $ inj a, coerceExpr $ inj b, coerceExpr (inj c)]
+  inj (a, b, c) = AnExpr $ tuple [coerceExpr $ inj a, coerceExpr $ inj b, coerceExpr (inj c)]
 instance (Inj a, Inj b, Inj c, Inj d) => Inj (a, b, c, d) where
-  inj (a, b, c, d) = AnExpr $ Tuple [coerceExpr $ inj a, coerceExpr $ inj b, coerceExpr (inj c), coerceExpr (inj d)]
+  inj (a, b, c, d) = AnExpr $ tuple [coerceExpr $ inj a, coerceExpr $ inj b, coerceExpr (inj c), coerceExpr (inj d)]
 
 coerceExpr :: DSL b -> Expr' 'Rec
 coerceExpr (AnExpr e) = e

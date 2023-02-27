@@ -66,7 +66,7 @@ doCoroutineTransform tl = tl' { defs = M.union funs $ M.union (M.map ([],) (gene
     funs = runIdentity $ withVarGenT varGen' $ fmap (M.fromListWith (error "key collision") . concat) $ traverse (uncurry doFun) $ M.toList $ M.filter (not . null . fst) (defs tl)
     -- !_ = error (show sources)
     doFun k (args, body) = do
-       body' <- loadInputs args inputs (mapExpr (\x -> Tuple [Tuple (fmap Ref args), x]) body)
+       body' <- loadInputs args inputs (mapExpr (\x -> tuple [tuple (fmap Ref args), x]) body)
        let aggs = doAggregates k ops
        pure $ (k, ([], body')):aggs
       where
@@ -88,7 +88,7 @@ loadInputs locs inps body = do
    let
      load1 as proj = do
         (unpacked, used) <- makeUnpacked proj
-        pure $ OpLang $ Unpack (Ref as) unpacked (Return $ Tuple $ map Ref used)
+        pure $ OpLang $ Unpack (Ref as) unpacked (Return $ tuple $ map Ref used)
      loadK (src, projs) = do
         as <- genVar "p"
         projs' <- traverse (load1 as) projs
@@ -144,7 +144,7 @@ coroutineTransform freeVars = tryTransM (\rec -> \case
       bindVar <- genVar "l"
       outLabel <- genVar "out"
       let nested = Bind (LRef stash) bindVar (OpLang $ Unpack (Ref bindVar) (Just <$> S.toList frees) out)
-      let self = Return (Tuple $ fmap Ref (S.toList frees))
+      let self = Return (tuple $ fmap Ref (S.toList frees))
       tellGenerated outLabel nested
       modify $ \s -> s { firstLabel = firstLabel s <|> Just (Source stash), lastLabel = Source outLabel }
       pure self

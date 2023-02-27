@@ -22,7 +22,6 @@
 -- - The first fields is used 0-n times
 -- - The second field is used 0-1 times, and its sub-fields are used 0-n times
 --
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE OverloadedStrings #-}
 module DemandAnalysis  where
@@ -107,7 +106,7 @@ newtype GlobalEnv = GlobalEnv { globalEnv :: M.Map Source [Demand] }
 analyseCall :: GlobalEnv -> Thunk -> DemandEnv
 analyseCall env (Thunk src args) = case M.lookup src (globalEnv env) of
     Just demands -> DemandEnv (M.fromList (zip args demands))
-    Nothing -> DemandEnv (M.fromList (zip args (repeat NoInfo)))
+    Nothing -> DemandEnv (M.fromList (map (,NoInfo) args))
 
 instance Lattice DemandEnv where
     (/\) :: DemandEnv -> DemandEnv -> DemandEnv
@@ -125,7 +124,7 @@ calcDemand _ dmd (Ref v) = DemandEnv (M.singleton v dmd)
 calcDemand g dmd (Proj idx total ex) = calcDemand g dmd' ex
   where
     leftOf = idx
-    rightOf = (total-idx-1)
+    rightOf = total-idx-1
     dmd' = tup (replicate leftOf NoneUsed ++ [dmd] ++ replicate rightOf NoneUsed)
 calcDemand g dmd (Slice offset len total ex) = calcDemand g dmd' ex
   where
@@ -136,7 +135,7 @@ calcDemand g dmd (Slice offset len total ex) = calcDemand g dmd' ex
       NoInfo -> replicate len NoInfo
       Each _ -> error "projection on list"
     dmd' = tup (replicate leftOf NoneUsed ++ inner ++ replicate rightOf NoneUsed)
-calcDemand g dmd (Tuple ls) = foldr1 (/\) (zipWith (calcDemand g) dmds ls)
+calcDemand g dmd (Tuple _ ls) = foldr1 (/\) (zipWith (calcDemand g) dmds ls)
   where
     dmds = case dmd of
       Tup ds -> ds
@@ -158,9 +157,7 @@ calcDemandL _ NoneUsed _ = botEnv
 calcDemandL g d (Bind bhead var bod) = bodEnv /\ headEnv
   where
     bodEnv = calcDemandL g d bod
-    bodDemand = case M.lookup var (demandEnv bodEnv) of
-      Just dmd -> each dmd
-      Nothing -> NoneUsed
+    bodDemand = maybe NoneUsed each $ M.lookup var (demandEnv bodEnv)
     headEnv = calcDemandL g bodDemand bhead
 calcDemandL g d (Filter p b) = calcDemand g d p /\ calcDemandL g d b
 calcDemandL g d (Return b) = case d of
@@ -177,9 +174,7 @@ calcDemandOL g d (Union l r) = calcDemandL g d l /\ calcDemandL g d r
 calcDemandOL g d (Let v exprHead bod) = bodEnv /\ headEnv
   where
     bodEnv = calcDemandL g d bod
-    headDemand = case M.lookup v (demandEnv bodEnv) of
-      Just dmd -> each dmd
-      Nothing -> NoneUsed
+    headDemand = maybe NoneUsed each $ M.lookup v (demandEnv bodEnv)
     headEnv = calcDemand g headDemand exprHead
 calcDemandOL g d (Call t) = calcDemand g d t
 calcDemandOL g _ (Force t) = analyseCall g t

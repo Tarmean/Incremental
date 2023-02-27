@@ -2,6 +2,8 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes, ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use <$>" #-}
 -- | Typecheck and elaborate a program.
 module Elaborator where
 
@@ -57,7 +59,7 @@ addListTy (s, (_:_,_)) (ListTy _ t) = ListTy (SourceTy s) t
 addListTy _ _ = error "not a list ty"
 
 fillUVars :: ExprType -> M ExprType
-fillUVars (TupleTyp t) = TupleTyp <$> traverse fillUVars t
+fillUVars (TupleTyp tag t) = TupleTyp tag <$> traverse fillUVars t
 fillUVars (ListTy k t) = ListTy <$> fillUVars k <*> fillUVars t
 fillUVars (UnificationVar v) = do
     env <- gets uEnv
@@ -138,16 +140,16 @@ tcExprW (AThunk thunk) = do
 tcExprW (Proj i tot e) = do
    e <- tcExpr e
    case nTy e of
-      TupleTyp tys -> pure $ setEType (Proj i tot e) (tys !! i)
+      TupleTyp _tag tys -> pure $ setEType (Proj i tot e) (tys !! i)
       uv@UnificationVar {} -> do
          v <- replicateM tot freshUVar
-         _ <- unify uv (TupleTyp v)
+         _ <- unify uv (tupleTyp v)
          pure $ setEType (Proj i tot e) (v !! i)
       _ -> throwError ("tcExpr: Proj on non-record" <> show e)
-tcExprW Unit = pure $ setEType Unit (TupleTyp [])
-tcExprW (Tuple es) = do
+tcExprW Unit = pure $ setEType Unit (tupleTyp [])
+tcExprW (Tuple tag es) = do
    es' <- traverse tcExpr es
-   pure $ setEType (Tuple es') (TupleTyp (map nTy es'))
+   pure $ setEType (Tuple tag es') (TupleTyp tag (map nTy es'))
 tcExprW (BOp op a b) = do
   a' <- tcExpr a
   b' <- tcExpr b
@@ -171,12 +173,12 @@ tcExprW (Lookup source args) = do
    keyTy <- freshUVar
    valTy <- freshUVar
    origin <- freshUVar
-   _ <- unify sourceTy (ListTy origin (TupleTyp [keyTy, valTy]))
+   _ <- unify sourceTy (ListTy origin (tupleTyp [keyTy, valTy]))
    pure $ hasEType (Lookup source args) valTy
 tcExprW (Slice l r total tuple) = do
    tuple <- tcExpr tuple
    case nTy tuple of
-      TupleTyp ls -> pure $ hasEType (Slice l r total tuple) (TupleTyp (slice l r (flattenType ls)))
+      TupleTyp tag ls -> pure $ hasEType (Slice l r total tuple) (TupleTyp tag (slice l r (flattenType ls)))
       _ -> error "Illegal Slice"
 
 slice :: Int -> Int -> [a] -> [a]
@@ -236,7 +238,7 @@ tcOpLang (Union a b) = do
 tcOpLang (Unpack l vs body) = do
   l' <- tcExpr l
   case nTy l' of
-    TupleTyp tys -> do
+    TupleTyp _ tys -> do
       body' <- local (M.union (M.fromList [ (a,b) | (Just a, b) <- zipStrict vs tys])) (tcLang body)
       pure $ HasType Inferred (OpLang $ Unpack l' vs body') (lTy body')
     _ -> throwError ("tcOpLang: Unpack on non-record: " <> prettyS l')
@@ -331,8 +333,8 @@ unify = go
         Just l -> go l r
     go l (UnificationVar v) = go (UnificationVar v) l
     go (ListTy k l) (ListTy k' r) = ListTy <$> go k k' <*> go l r
-    go (TupleTyp l) (TupleTyp r) 
-      | length l == length r = TupleTyp <$> (zipStrict l r & traverse (uncurry go))
+    go (TupleTyp tagL l) (TupleTyp tagR r) 
+      | tagL == tagR = TupleTyp tagL <$> (zipStrict l r & traverse (uncurry go))
     go l r 
       | l == r = pure l
       -- | otherwise = pure l

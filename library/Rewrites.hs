@@ -30,7 +30,6 @@ import GHC.Stack (HasCallStack)
 import Control.Monad.Reader.Class
 import Control.Lens (traverseOf, each, _1)
 import Data.Maybe (fromMaybe)
-import Debug.Trace (traceM)
 
 
 
@@ -130,7 +129,7 @@ hoistFilter (Bind (Filter g e) v e') = Just (Filter g (Bind e v e'))
 hoistFilter _ = Nothing
 
 projTuple :: Expr -> Maybe Expr
-projTuple (Proj i _ (Tuple ls)) = Just (ls !! i)
+projTuple (Proj i _ (Tuple _ ls)) = Just (ls !! i)
 projTuple _ = Nothing
 
 distinctUnit :: Lang -> Maybe Lang
@@ -143,7 +142,7 @@ filterFilter (Filter p (Filter q s)) = Just (Filter (BOp And p q) s)
 filterFilter _ = Nothing
 
 trivialRepack :: Expr -> Maybe Expr
-trivialRepack (Tuple (Proj 0 i e:ls))
+trivialRepack (Tuple _ (Proj 0 i e:ls))
   | length ls == (i-1) && all isRepack (zip [1..] ls) = Just e
   where
     isRepack (j,Proj k i' e')
@@ -361,7 +360,7 @@ insertBinds rec m = Just $ do
 mkFloatedBinds :: Lang -> (Source, Var, [Expr]) -> Lang
 mkFloatedBinds r (Source k, v, e) = Bind (LRef k) v (filters e r)
   where
-   filters ls = Filter (BOp Eql (Tuple ls) (Proj 0 2 (Ref v)))
+   filters ls = Filter (BOp Eql (tuple ls) (Proj 0 2 (Ref v)))
 lowerLookup :: (MonadWriter [(Source, Var, [Expr])] m, MonadVar m) => Expr -> Maybe (m Expr)
 lowerLookup (Lookup k expr) = Just $ do
   l <- genVar "l"

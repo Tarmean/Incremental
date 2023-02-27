@@ -7,7 +7,6 @@ module ValueNaming where
 import qualified Data.Map.Strict as M
 import Data.Functor.Identity
 import qualified Data.Set as S
-import Util
 import qualified Data.Map.Lazy as ML
 import Control.Monad.State.Strict
 import Control.Monad.Reader

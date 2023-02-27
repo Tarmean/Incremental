@@ -27,7 +27,34 @@ import Data.List (intersperse)
 import Util
 import Data.Maybe (catMaybes)
 import Data.Functor.Identity (runIdentity)
+import qualified Data.ByteString.Char8 as BS
 
+-- Plan for aggregates:
+--
+-- Do a Fold operation+monoid decorators. Tuples of monoids form a monoid. Aggregates like sum or window functions are monoids.
+--
+-- But we extend SQL:
+--
+-- - Singleton maps are built like `key := someMonoidValue` and form monoids
+-- - list(expr) and set(expr) are monoids which stand for collections
+--
+-- We do not get flat values for everything.
+-- The solution is that Folds of tuples are tuples of Folds. We
+--
+-- - For each key prefix we generate a Fold
+-- - for collection aggregates we define a thunk+toplevel function
+--
+-- [keys := list(s)]_env => Thunk(new_thunk, [])
+--    def new_thunk(): for ps in env: yield [keys, s]
+--
+-- Map results are just tables with extra columns for the keys. We support
+--
+-- - indexing
+-- - toList
+--
+-- toList forces the thunk.
+-- indexing is a lookup op, but what if the result is another collection? Then we generate a new thunk with a function which forces+filters the indexed thunk.
+-- This requires type information, though
 
 
 -- | AST's are tagged by a `phase` parameter.
@@ -81,6 +108,26 @@ a </> b = a <> line <> b
 instance Pretty Thunk where
     pretty (Thunk s as) = pretty s <> tupled (map pretty as)
 
+
+data ConstrTag = ConstrTag { conName :: BS.ByteString, conArity :: Int }
+  deriving (Eq, Ord, Show, Data)
+
+tuple :: [Expr' r] -> Expr' r
+tuple ls = Tuple (tupleTag (length ls)) ls
+tupleTyp :: [ExprType] -> ExprType
+tupleTyp ls = TupleTyp (tupleTag (length ls)) ls
+tupleTag :: Int -> ConstrTag
+tupleTag = ConstrTag "Tuple"
+isTupleTag :: ConstrTag -> Bool
+isTupleTag (ConstrTag "Tuple" _) = True
+isTupleTag _ = False
+
+
+instance Pretty ConstrTag where
+    pretty c
+      | isTupleTag c = ""
+      | otherwise = pretty (BS.unpack $ conName c)
+
 -- | AST for Expression language
 data Expr' (p::Phase) where
     Ref :: Var -> Expr' p
@@ -89,7 +136,7 @@ data Expr' (p::Phase) where
     Slice :: Int -> Int -> Int -> (Expr' p) -> Expr' p
     BOp :: BOp -> Expr' p -> Expr' p -> Expr' p
     Unit :: Expr' p
-    Tuple :: [Expr' p] -> Expr' p
+    Tuple :: ConstrTag -> [Expr' p] -> Expr' p
     Aggr :: AggrOp -> Thunk -> Expr' p
     AggrNested :: AggrOp -> (Lang' p) -> Expr' p
     Nest :: Lang' a -> Expr' a
@@ -115,7 +162,7 @@ instance TraverseP Expr'  where
    traverseP f (Slice l r tot e) = Slice l r tot <$> traverseP f e
    traverseP f (BOp op a b) = BOp op <$> traverseP f a <*> traverseP f b
    traverseP _ Unit = pure Unit
-   traverseP f (Tuple es) = Tuple <$> traverse (traverseP f) es
+   traverseP f (Tuple ct es) = Tuple ct <$> traverse (traverseP f) es
    traverseP f (AggrNested op a) = AggrNested op <$> f a
    traverseP _ (Aggr _ _) = error "aggr"
    traverseP f (Nest o) = Nest <$> f o
@@ -127,7 +174,7 @@ instance TraverseP Expr'  where
 data AggrOp = SumT | MinT | MaxT
   deriving (Eq, Ord, Show, Data)
 type Expr = Expr' 'Flat
-data ExprType = TupleTyp [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep  | TypeError ExprType ExprType
+data ExprType = TupleTyp ConstrTag [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep  | TypeError ExprType ExprType
   deriving (Eq, Ord, Show, Typeable)
 intTy :: ExprType
 intTy = EBase (typeRep (Proxy :: Proxy Int))
@@ -138,7 +185,7 @@ boolTy = EBase (typeRep (Proxy :: Proxy Bool))
 
 instance Data ExprType where
     gfoldl _ z a@EBase {} = z a
-    gfoldl k z (TupleTyp ls)       = z TupleTyp `k` ls
+    gfoldl k z (TupleTyp ct ls)       = z TupleTyp `k` ct `k` ls
     gfoldl k z (ListTy t v) = z ListTy `k` t `k` v
     gfoldl k z (UnificationVar v) = z UnificationVar `k` v
     gfoldl k z (SourceTy v) = z SourceTy `k` v
@@ -154,7 +201,7 @@ instance Data ExprType where
         4 -> k (z SourceTy)
         3 -> k (z UnificationVar)
         2 -> k (k (z ListTy))
-        1 -> k (z TupleTyp)
+        1 -> k (k (z TupleTyp))
         i -> error ("illegal constructor index in expr" <> show i)
 
     toConstr EBase {} = eBaseConstr
@@ -232,6 +279,9 @@ asyncBindConstr = mkConstr langDataType "AsyncBind" [] Prefix
 langDataType :: DataType
 langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, asyncBindConstr]
 
+
+
+
 instance TraverseP Lang' where
     traverseP f (Bind l v l') = Bind <$> f l <*> pure  v <*> f l'
     traverseP f (Filter e l) = Filter <$> traverseP f e <*> f l
@@ -306,8 +356,8 @@ instance Pretty Source where
     pretty (Source s) = pretty s
 instance Pretty ExprType where
     pretty (EBase t) = pretty (show t)
-    pretty (TupleTyp [a]) = "(" <> pretty a <> ",)"
-    pretty (TupleTyp ts) = parens (hsep (punctuate comma (map pretty ts)))
+    pretty (TupleTyp ct [a]) = pretty ct <> "(" <> pretty a <> ",)"
+    pretty (TupleTyp ct ts) = pretty ct <> tupled (map pretty ts)
     pretty (ListTy RootTy l) = brackets (pretty l)
     pretty (ListTy t l) = brackets (pretty l) <> "@" <> pretty t
     pretty (SourceTy o) = pretty o
@@ -331,8 +381,8 @@ instance Pretty Expr where
     pretty Unit = "()"
     pretty (Aggr op v) = pretty op <> "(" <>  pretty v <> ")"
     pretty (AggrNested op v) = pretty op <> "(" <>  pretty v <> ")"
-    pretty (Tuple [a]) = "(" <> pretty a <> ",)"
-    pretty (Tuple es) = tupled (map pretty es)
+    pretty (Tuple ct [a]) = pretty ct <> "(" <> pretty a <> ",)"
+    pretty (Tuple ct es) = pretty ct <> tupled (map pretty es)
     pretty (AThunk a) = pretty a
     pretty (Nest a) = "Nest" <+> pretty a
     pretty (HasEType Inferred e ty) = parens $ pretty e <+> ":::" <+> pretty ty
