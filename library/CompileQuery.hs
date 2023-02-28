@@ -148,6 +148,96 @@ deriving instance Ord Expr
 deriving instance Show Expr
 deriving instance Data Expr
 
+
+-- | Base aggregates enriched
+data AnAggregate' (p :: Phase)
+    = BaseAg AggrOp (Expr' p) -- ^ Base aggregate, e.g. SUM(cost)
+    | MapOf (Expr' p) (AnAggregate' p) -- ^ Grouping aggregate, (M.singleton k v). Merging a map merges the matching keys
+    | AggrTuple [AnAggregate' p] -- ^ A tuple-aggregate produces a tuple of aggregates 
+    | ListOf (Expr' p) -- ^ Not an aggregate as such, produces in a table reference
+    | SetOf (Expr' p) -- ^ ListOf with @distinct@ on top
+    -- | WindowFun  -- | Todo
+deriving instance Eq AnAggregate
+deriving instance Ord AnAggregate
+deriving instance Show AnAggregate
+deriving instance Data AnAggregate
+type AnAggregate = AnAggregate' 'Flat
+-- | An aggregate may contain multiple incompatible group-bys which SQL doesn't support.
+-- We partition the sub-expressions by key context.
+--
+-- >  fold [p] projects (p.category := (list(p.name), p.sub_category := sums(p.cost))) :: DSL (Map String ([String], Map String Int))
+--
+-- context of list(p.name): @KeyContext (fromList [k1]) False@
+-- translation: @SELECT p.category, p.name FROM projects@
+--
+-- context of sums(p.cost): @KeyContext (fromList [k1,k2]) True@
+-- translation: @SELECT p.category, p.sub_category, SUM(p.cost) FROM projects GROUP BY p.category,p.sub_category@
+data KeyContext = KeyContext { outerKeys :: S.Set Expr, flatGroup :: Bool }
+
+
+-- [Note: Map Operations]
+-- A @DSL (Map k v)@ is represented as a table @DSL [(k,v)]@. We support two main operations:
+--
+-- - toList (it's just a typecast)
+-- - Indexing
+--
+--
+-- Indexing is a bit harder because we need two implementation strategies:
+--
+-- - If the result is a scalar, we can do a lookup. This compiles to a scalar query in SQL
+--
+-- @
+-- {someMap !? k}
+--
+-- (SELECT m.rhs
+-- FROM [someMap] m
+-- WHERE m.lhs = [k])
+-- @
+--
+--
+-- But what if the map holds nested containers? Easy, project them:
+--
+-- @
+-- {fold [p] projects (p.category := (list(p.name), p.sub_category := sums(p.cost))) :: DSL (Map String ([String], Map String Int))}
+--
+--
+-- def cat_nested():
+--    for p in projects:
+--       yield ((p.category,),p.name)
+--
+-- def cat_subcat_flat():
+--    fold [p] projects (p.category, (p.subCategory, (sum(p.name)))):
+--
+-- def proj_cat(k):
+--    for (cat, name) in cat_nested:
+--       if cat == k:
+--         yield name
+--
+-- def proj_cat_subcat_flat1(k):
+--    for (cat, o) in cat_subcat_flat():
+--       if cat == k:
+--         yield o
+--
+-- def proj_cat_subcat_flat2(k,k2):
+--    for (subcatcat, o) in proj_cat_subcat_flat1(k):
+--       if subcat == o:
+--         yield o
+--
+-- {proj ! k}
+-- (Thunk(proj_cat, k), Thunk(proj_cat_subcat_flat(k)))
+-- @
+--
+-- Can we unify these helper functions? Well, maybe:
+--
+-- @
+-- def Project<K extends Eq, V, T extends [(K,V)]>(m: T, k: K) -> [V]:
+--     for (a,b) in force_thunk(m):
+--       if a == k:
+--         yield b
+-- @
+--
+-- But we do need a monomorphised copy for the thunk-forcing coroutine transformation. 
+
 data ALit = IntLit Int | StrLit String
   deriving (Eq, Ord, Show, Data)
 instance Pretty ALit where
@@ -172,6 +262,10 @@ instance TraverseP Expr'  where
 (.==) :: Expr' p -> Expr' p -> Expr' p
 (.==) = BOp Eql
 data AggrOp = SumT | MinT | MaxT
+            | ScalarFD -- ^ Imagine we group by user_id and want to select username
+                       -- The username is uniquely determined by the id, so the
+                       -- standard says we can select it as a scalar. 
+                       -- Some DBs (cough oracle cough) don't implement this correctly
   deriving (Eq, Ord, Show, Data)
 type Expr = Expr' 'Flat
 data ExprType = TupleTyp ConstrTag [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep  | TypeError ExprType ExprType
@@ -373,6 +467,7 @@ instance Pretty AggrOp where
     pretty SumT = "SUM"
     pretty MinT = "MIN"
     pretty MaxT = "MAX"
+    pretty ScalarFD = "UNIQUE"
 instance Pretty Expr where
     pretty (Ref t) = pretty t
     pretty (Proj i _tot e) = pretty e <> "." <> pretty i
