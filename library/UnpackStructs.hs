@@ -34,8 +34,10 @@ flattenType ls = concatMap go ls
 projToSlice :: (Source -> Int) -> Expr -> Maybe Expr
 -- projToSlice _ (Proj 0 1 e) = Just $ e
 projToSlice env (Proj field _total (HasEType _ expr (TupleTyp _ tys)))
-  | resultIsTuple = Just $ Slice offset width (length (flattenType tys)) expr
+  | resultIsTuple = Just (tryMergeSlice out)
+  | otherwise = Just (tryMergeSlice $ Proj 0 1 out)
   where
+    out = tryMergeSlice $ Slice offset width (length (flattenType tys)) expr
     (l,x) = case splitAt field tys of
         (l, x:_) -> (l,x)
         _ -> undefined
@@ -48,7 +50,7 @@ projToSlice _ _ = Nothing
 
 
 unpackStructs :: TopLevel -> TopLevel
-unpackStructs tl = runT' (tryTrans_ (projToSlice env) ||| recurse) tl
+unpackStructs tl = runT' (recurse >>> tryTrans_ (projToSlice env)) tl
   where
     env x = length $ fst $ defs tl M.! x
 
@@ -58,8 +60,9 @@ mergeSlice (Slice i _ total (Proj k _ e)) = Just $ Proj (i+k) total e
 mergeSlice (Proj i _ (Slice off _ total e)) = Just $ Proj (i+off) total e
 mergeSlice _ = Nothing
 
-sliceToTuple :: Lang -> Maybe Lang
-sliceToTuple (Return (Slice k l t e)) = Just $ Return (tuple [Proj (k+i) t e | i <- [0..l-1]])
+sliceToTuple :: Expr -> Maybe Expr
+-- sliceToTuple (Return (Slice k l t e)) = Just $ Return (tuple [Proj (k+i) t e | i <- [0..l-1]])
+sliceToTuple (Slice k l t e) = Just $ (tuple [Proj (k+i) t e | i <- [0..l-1]])
 sliceToTuple _ = Nothing
 
 flattenTuple :: Expr -> Maybe Expr
@@ -91,31 +94,35 @@ dropTyp _ = Nothing
 
 mergeSlices :: Data a => a -> a
 mergeSlices = runT' $ do
-    block (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ updateGroup &&& tryTrans_ flattenTuple &&& tryTrans_ flattenLookupArgs &&& tryTrans_ flattenOps &&& tryTrans_ mergeSlice )))
+    block (recurse >>> (tryTrans_ refToSlice ||| tryTrans_ dropTyp ||| (tryTrans_ flattenTuple &&& tryTrans_ flattenLookupArgs &&& (tryTrans_ flattenOps ||| tryTrans_ flattenAggr) &&& tryTrans_ mergeSlice )))
     >>> block (tryTrans_ sliceToTuple ||| recurse)
-
-updateGroup :: OpLang -> Maybe OpLang
-updateGroup (Group l _ k (OpLang (HasType _ e (ListTy _ (TupleTyp _ ls))))) = Just (Group widthL widthR k e)
-  where
-    (tyL, tyR) = splitAt l ls
-    widthL = sum (map (widthOfType (const 0)) tyL)
-    widthR = sum (map (widthOfType (const 0)) tyR)
-updateGroup _ = Nothing
 
 flattenLookupArgs :: Expr -> Maybe Expr
 flattenLookupArgs (Lookup sym args) = Just $ Lookup sym (concatMap flattenExprList args)
 flattenLookupArgs _ = Nothing
 
+flattenAggr :: AnAggregate -> Maybe AnAggregate
+flattenAggr (AggrTuple ls) = Just $ AggrTuple (concatMap flattenTuple ls)
+  where
+    flattenTuple (AggrTuple ls) = ls
+    flattenTuple a = [a]
+flattenAggr (BaseAg ScalarFD ls)
+  | Just len <- shouldSplit ls
+  = Just $ AggrTuple [BaseAg ScalarFD (tryMergeSlice $ Proj i len ls) | i <- [0..len-1]]
+flattenAggr _ = Nothing
+
 flattenOps :: Expr -> Maybe Expr
 flattenOps (BOp Eql l r)
   | Just len <- shouldSplit l
   = Just $ tuple [BOp Eql (tryMergeSlice $ Proj i len l) (tryMergeSlice $ Proj i len r) | i <- [0..len-1]]
-  where
-    tryMergeSlice a = fromMaybe a (mergeSlice a)
-    shouldSplit (HasEType _ _ ty) = case ty of
-      (TupleTyp _ l) -> Just (length l)
-      _ -> Nothing
-    shouldSplit (Tuple _ l) = Just $ length l
-    shouldSplit (Slice _ t _ _) = Just t
-    shouldSplit _ = Nothing
 flattenOps _ = Nothing
+-- | Is this a tuple?
+shouldSplit :: Expr -> Maybe Int
+shouldSplit (HasEType _ _ ty) = case ty of
+  (TupleTyp _ l) -> Just (length l)
+  _ -> Nothing
+shouldSplit (Tuple _ l) = Just $ length l
+shouldSplit (Slice _ t _ _) = Just t
+shouldSplit _ = Nothing
+tryMergeSlice :: Expr -> Expr
+tryMergeSlice a = fromMaybe a (mergeSlice a)

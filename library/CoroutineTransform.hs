@@ -79,8 +79,12 @@ collect = M.toList . M.map S.toList . M.fromListWith (<>) . map (second S.single
 
 doAggregates :: Source -> [AggrOp] -> [(Source, ([a], Lang))]
 doAggregates (Source (Var i s)) aggs = [
-    (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Group 1 1 [agg] (LRef $ Var i s))) | agg <- aggs
+    (Source $ Var i (s ++ "_" ++ show agg), ([], OpLang $ Fold p ctx (aggregate agg) (LRef $ Var i s))) | agg <- aggs
   ]
+  where
+    p = Var i (s ++ "_proj")
+    aggregate agg = AggrTuple [BaseAg ScalarFD (Proj 0 2 (Ref p)),  BaseAg agg (Proj 1 2 (Ref p))]
+    ctx = (KeyContext (S.fromList [Proj 0 2 (Ref p)]) True)
 
 loadInputs :: [Var] -> [(Source, [Projections])] -> Lang -> VarGenT Identity Lang
 loadInputs _ [] body = pure body

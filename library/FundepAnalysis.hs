@@ -52,6 +52,7 @@ import Control.Monad.State.Strict
 import SQL
 import Control.Monad.Reader
 import Prettyprinter
+import qualified CompileQuery as Q
 
 
 infixr 5 :.
@@ -110,7 +111,7 @@ jobTable = Table (TableMeta (FD [["job_id"]]) ["user_id", "job_id", "cost"]) "jo
 aTest :: SQL
 aTest = ASPJ (SPJ {
   sources = [(Var 2 "U", userTable), (Var 3 "PQ", aggrTable)],
-  wheres = [Eql (Ref (Var 2 "U") "user_id") (Ref (Var 3 "PQ") "user_id")],
+  wheres = [BOp Q.Eql (Ref (Var 2 "U") "user_id") (Ref (Var 3 "PQ") "user_id")],
   proj = M.fromList [("user_id", Ref (Var 2"U") "user_id"), ("name", Ref (Var 2 "U") "name"), ("agg", Ref (Var 3 "PQ") "agg")]
         })
   -- sources = [(Var 2 "U", userTable), (Var 3 "PQ", aggrTable), (Var 4 "PQ2", aggrTable2)],
@@ -122,7 +123,7 @@ aTest = ASPJ (SPJ {
       ASPJ SPJ {
         sources = [(Var 1 "J", jobTable)],
         wheres = [],
-        proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp SumO (Ref (Var 1 "J") "cost"))]
+        proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp Q.SumT (Ref (Var 1 "J") "cost"))]
       }
      -- aggrTable2 =
      --  GroupQ [Ref (Var 1 "J") "user_id"] $
@@ -147,7 +148,7 @@ makeGraph self (ASPJ spj) = do
         forM_ spj.wheres $ \v -> do
             case v of
               -- See Note isLocalSource
-              Eql (Ref l x) (Ref r y)
+              BOp Q.Eql (Ref l x) (Ref r y)
                 | isLocalSource l || isLocalSource r -> do
                   l <- resolveLocal l
                   r <- resolveLocal r

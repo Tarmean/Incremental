@@ -20,6 +20,7 @@ import Control.Monad.Trans.Writer.CPS
 import Data.Either (partitionEithers)
 import Data.Monoid (Any(..))
 import Data.Foldable (foldrM)
+import qualified CompileQuery as Q
 
 data SPJ = SPJ { sources :: [(Var, SQL)], wheres :: [Expr], proj :: M.Map AField Expr }
   deriving (Show, Eq, Ord, Data, Generic)
@@ -28,17 +29,17 @@ data SQL = ASPJ SPJ
          | GroupQ { groups :: [Expr], source :: SQL }
          | Table TableMeta String
          | Slice { limit :: Maybe Int,  offset :: Maybe Int, source :: SQL }
+         | DistinctQ { source :: SQL }
          | OrderBy { by :: [Expr], source :: SQL }
   deriving (Show, Eq, Ord, Data, Generic)
 type AField = String
-data Expr = Eql Expr Expr | Ref Var AField | AggrOp AnOp Expr
-  deriving (Show, Eq, Ord, Data, Generic)
-data AnOp = SumO | MaxO
+data Expr = BOp Q.BOp Expr Expr | Ref Var AField | AggrOp Q.AggrOp Expr | Singular SQL | Lit Q.ALit
   deriving (Show, Eq, Ord, Data, Generic)
 instance Pretty SQL where
     pretty (Table _ name) = pretty name
     pretty (GroupQ g e) = align $ group $ pretty e <> line <> "GROUP BY " <> tupled (map pretty g)
     pretty (ASPJ spj) = pretty spj
+    pretty (DistinctQ spj) = "DISTINCT " <> pretty spj
     pretty (Slice lim off e) = align $ group $ pretty e <> line <> limPart <> offPart
       where
         limPart = maybe "" (\l -> "LIMIT " <> pretty l) lim
@@ -62,13 +63,13 @@ instance Pretty SPJ where
           | isComplex p = parens (pretty p)
           | otherwise = pretty p
 
-instance Pretty AnOp where
-    pretty SumO = "SUM"
-    pretty MaxO = "MAX"
 instance Pretty Expr where
-    pretty (Eql a b) = pretty a <+> "=" <+> pretty b
+    pretty (BOp op a b) = pretty a <+> pretty op <+> pretty b
     pretty (Ref v s) = pretty v <> "." <> pretty s
+    pretty (AggrOp Q.ScalarFD o) = pretty o
     pretty (AggrOp top o) = pretty top <> parens (pretty o)
+    pretty (Singular sql) = parens (pretty sql)
+    pretty (Lit a) = pretty a
 
 substSQL :: Data a => Var -> M.Map AField Expr -> a -> a
 substSQL v fields = runT' (

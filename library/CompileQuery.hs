@@ -66,7 +66,7 @@ import qualified Data.ByteString.Char8 as BS
 --
 -- Only `Lang' p` is a GADT which uses the parameter, which makes the mutually recursive
 class TraverseP f where
-   traverseP :: (HasCallStack, Applicative m) => (Lang' p -> m (Lang' q)) -> f p -> m (f q)
+   traverseP :: (HasCallStack, Applicative m) => (Lang' p -> m (Lang' 'Flat)) -> f p -> m (f 'Flat)
 
 
 -- [Note: Observable sharing]
@@ -157,6 +157,18 @@ data AnAggregate' (p :: Phase)
     | ListOf (Expr' p) -- ^ Not an aggregate as such, produces in a table reference
     | SetOf (Expr' p) -- ^ ListOf with @distinct@ on top
     -- | WindowFun  -- | Todo
+instance TraverseP AnAggregate' where
+    traverseP f (BaseAg op e) = BaseAg op <$> traverseP f e
+    traverseP f (MapOf e ag) = MapOf <$> traverseP f e <*> traverseP f ag
+    traverseP f (AggrTuple ags) = AggrTuple <$> traverse (traverseP f) ags
+    traverseP f (ListOf e) = ListOf <$> traverseP f e
+    traverseP f (SetOf e) = SetOf <$> traverseP f e
+instance Pretty AnAggregate where
+    pretty (BaseAg op e) = pretty op <> parens (pretty e)
+    pretty (MapOf e ag) = pretty e <> " := " <> pretty ag
+    pretty (AggrTuple ags) = tupled $ map pretty ags
+    pretty (ListOf e) = "list" <> parens (pretty e)
+    pretty (SetOf e) = "set" <> parens (pretty e)
 deriving instance Eq AnAggregate
 deriving instance Ord AnAggregate
 deriving instance Show AnAggregate
@@ -172,7 +184,22 @@ type AnAggregate = AnAggregate' 'Flat
 --
 -- context of sums(p.cost): @KeyContext (fromList [k1,k2]) True@
 -- translation: @SELECT p.category, p.sub_category, SUM(p.cost) FROM projects GROUP BY p.category,p.sub_category@
-data KeyContext = KeyContext { outerKeys :: S.Set Expr, flatGroup :: Bool }
+data KeyContext' p = KeyContext { outerKeys :: S.Set (Expr' p), flatGroup :: Bool }
+type KeyContext = KeyContext' 'Flat
+
+deriving instance Eq KeyContext
+deriving instance Ord KeyContext
+deriving instance Show KeyContext
+deriving instance Data KeyContext
+instance Pretty KeyContext where
+    pretty (KeyContext ks isFlat)
+      | S.null ks = mempty
+      | isFlat = "group-by " <> tupled (map pretty $ S.toList ks)
+      | otherwise = "with segments " <> tupled (map pretty $ S.toList ks)
+
+
+instance TraverseP KeyContext' where
+    traverseP f (KeyContext ks b) = KeyContext <$> fmap S.fromList (traverse (traverseP f) $ S.toList ks) <*> pure b
 
 
 -- [Note: Map Operations]
@@ -396,7 +423,7 @@ data OpLang' (t::Phase)
   | Union (Lang' t) (Lang' t)
   | Unpack { unpack :: Expr' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
-  | Group { keyLen :: Int, valLen :: Int, groupBy :: [AggrOp], groupBody :: Lang' t }
+  | Fold { foldVar :: Var, context :: KeyContext' t, foldResult :: AnAggregate' t, foldSource :: Lang' t }
   | Call { nestedCall :: Expr' t }
   | Distinct (Lang' t)
   | Force { thunked :: Thunk }
@@ -411,7 +438,7 @@ instance TraverseP OpLang' where
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
     traverseP f (Unpack a b c) = Unpack <$> traverseP f a <*> pure b <*> f c
     traverseP f (Let v e b) = Let v <$> traverseP f e <*> f b
-    traverseP f (Group k k' a c) = Group k k' a <$> f c
+    traverseP f (Fold bound ctx res agg) = Fold bound <$> traverseP f ctx <*> traverseP f res <*> f agg
     traverseP f (HasType r a b) = HasType r <$> f a <*> pure b
     traverseP f (Call b) = Call <$> traverseP f b
     traverseP f (Distinct b) = Distinct <$> f b
@@ -485,7 +512,7 @@ instance Pretty Expr where
     pretty (Lookup v e) = pretty v <> pretty e
     pretty (Lit i) = pretty i
 instance Pretty Lang where
-    pretty (Bind a b c) = nest 4 $ group $ "for" <+> pretty b <+> "in" <+> optParens (align (pretty a)) <+> "{" <> (line <> pretty c) </> "}"
+    pretty (Bind a b c) = nest 6 $ group $ "for" <+> pretty b <+> "in" <+> optParens (align (pretty a)) <+> "{" <> (line <> pretty c) </> "}"
       where
         optParens d = group $ flatAlt ("("<> line) space <> align d <> flatAlt (line <> ")") space
     pretty (LRef v) = "*" <> pretty v
@@ -507,17 +534,19 @@ instance Pretty OpLang where
        mkTuple [a] = "(" <> a <> ",)"
        mkTuple as = tupled as
     pretty (Let v e b) = "let" <+> pretty v <+> ":=" <+> pretty e <> flatAlt line " in " <> pretty b
-    pretty (Group l r op body) = group $ "group" <> tupled [pretty l, pretty r] <>  parens (pretty op) <+> pretty body
+    pretty (Fold bound groupBy res body)
+        = group $ hang 2 $
+            group ("fold" </> parens (pretty bound <> " in " <> pretty body) </> pretty groupBy) </> (pretty res)
     pretty (HasType Inferred e t) = parens $ pretty e <+> ":::" <+> pretty t
     pretty (HasType _ e t) = pretty e <+> "::" <+> pretty t
     pretty (Call e) = "?" <> pretty e
     pretty (Force t) = "!" <> pretty t
     pretty (Distinct t) = "Distinct" <+> pretty t
 instance Pretty a => Pretty (TopLevel' a) where
-    pretty (TopLevel ds root) = "let " <> align (vsep (prettyAssignments ds)) </> "in " </> pretty root
+    pretty (TopLevel ds root) = nest 2 $ "let" </> (vsep (prettyAssignments ds)) </> "in " </> pretty root
       where
 
-        prettyAssignments m = [pretty k <> prettyVars vars <+> "=" <+>  pretty v | (k, (vars,v)) <- M.toList m]
+        prettyAssignments m = [pretty k <> prettyVars vars <+> group (nest 4 ("=" </>  (pretty v))) | (k, (vars,v)) <- M.toList m]
         prettyVars [] = mempty
         prettyVars vs = list (map pretty vs)
 

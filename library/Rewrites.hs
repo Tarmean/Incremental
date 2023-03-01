@@ -286,6 +286,15 @@ compactVarsT
                   var' <- refreshVar var
                   body' <- rec body
                   pure (Let var' expr' body')
+         Fold var ctx out src -> Just $ do
+             src <- rec src
+             locally do
+                var <- refreshVar var
+                ctx <- rec ctx
+                out <- rec out
+                pure (Fold var ctx out src)
+
+
          _ -> Nothing)
   lookupRenamedVar
      = tryTransM_ @Lang \case

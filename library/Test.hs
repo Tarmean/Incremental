@@ -62,7 +62,7 @@ testAgg = T.do
     userGroupsTable :: T.DSL [(Int, Int)]
     userGroupsTable = table "userGroups" [intTy, intTy]
     groupsTable :: T.DSL [(String, Int)]
-    groupsTable = table "userGroups" [stringTy, intTy]
+    groupsTable = table "groups" [stringTy, intTy]
 
 -- -- testFlat :: RecLang
 -- -- testFlat = M.do

@@ -192,7 +192,7 @@ gatherInlines tl arities theDefs = S.union simples inlines
 inlinable :: Lang -> Bool
 -- inlinable (Comprehend {}) = True
 -- inlinable (Return {}) = True
-inlinable (OpLang Group{}) = False
+inlinable (OpLang Fold{}) = False
 inlinable _ = True
 
 -- | Count how many results are produced by a query
@@ -207,7 +207,7 @@ outMultiplicity env (OpLang l) = case l of
   Union a b -> outMultiplicity env a <> outMultiplicity env b
   Unpack _ _ b -> outMultiplicity env b
   Let _ _ b -> outMultiplicity env b
-  Group {} -> Once
+  Fold {} -> Once
   Call _ -> Once
   Force (Thunk t _) -> M.findWithDefault Many t env
   HasType _ t _ -> outMultiplicity env t

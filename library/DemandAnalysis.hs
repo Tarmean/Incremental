@@ -179,8 +179,7 @@ calcDemandOL g d (Let v exprHead bod) = bodEnv /\ headEnv
 calcDemandOL g d (Call t) = calcDemand g d t
 calcDemandOL g _ (Force t) = analyseCall g t
 calcDemandOL g d (Distinct t) = calcDemandL g d t
-calcDemandOL g d (Group kl vl _ t) = calcDemandL g (headDemand /\ d) t
-  where headDemand = each (tup (replicate kl NoInfo ++ replicate vl NoneUsed))
+calcDemandOL g _ (Fold _ _ _ t) = calcDemandL g NoInfo t
 calcDemandOL g d (HasType _ t _) = calcDemandL g d t
 calcDemandOL g d (Unpack uHead uBound bod) = envBod /\ calcDemand g (mkProjEnv envBod) uHead
   where
