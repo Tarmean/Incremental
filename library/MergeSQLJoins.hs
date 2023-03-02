@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedRecordDot #-}
+{-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE BlockArguments #-}
@@ -27,9 +28,9 @@ mergeGroupBys = runT' (recurse >>> tryTrans_ mergeGroupBys1)
 
 
 
-mergeableWithLinearJoin :: SQL -> Maybe (SQL, SQL -> SQL)
-mergeableWithLinearJoin (GroupQ s a) = Just (a, GroupQ s)
-mergeableWithLinearJoin (Slice lim off a) = Just (a, Slice lim off)
+mergeableWithLinearJoin :: SQL -> Maybe (SQL, (forall a. Data a => a -> a) -> SQL -> SQL)
+mergeableWithLinearJoin (GroupQ s a) = Just (a, \f -> GroupQ (f s))
+mergeableWithLinearJoin (Slice lim off a) = Just (a, \_ -> Slice lim off)
 mergeableWithLinearJoin _ = Nothing
 
 
@@ -58,7 +59,7 @@ mergeGroupBys1 s = listToMaybe $ do
        spj
        & #proj <>~ M.fromList [ (f', Ref r f) | (r,f,f') <- S.toList frees]
        & #sources <>~ substSQL k spj.proj dominated) j
-   pure leftover' { sources = updateAt k (recon j') leftover'.sources }
+   pure leftover' { sources = updateAt k (recon id j') leftover'.sources }
 
 updateAt :: Ord k => k -> v -> [(k, v)] -> [(k,v)]
 updateAt k v ls = do

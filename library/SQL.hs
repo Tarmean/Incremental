@@ -71,6 +71,19 @@ instance Pretty Expr where
     pretty (Singular sql) = parens (pretty sql)
     pretty (Lit a) = pretty a
 
+substSQLs :: Data a => M.Map Var (M.Map AField Expr) -> a -> a
+substSQLs m a
+  | M.null m = a
+substSQLs fields a = runT' (
+   tryTransM @Expr (\rec -> \case
+       Ref v' f
+         -> case fields M.!? v' of
+            Nothing -> Nothing
+            Just m' -> case m' M.!? f  of
+               Just f' -> Just (rec f')
+               Nothing -> error ("substSQL: field not found: " <> show (m', f, fields))
+       _ -> Nothing)
+  ||| recurse) a
 substSQL :: Data a => Var -> M.Map AField Expr -> a -> a
 substSQL v fields = runT' (
    tryTrans_ @Expr \case
@@ -82,18 +95,19 @@ substSQL v fields = runT' (
        _ -> Nothing
   ||| recurse)
 
-flattenSPJ1 :: Var -> SQL -> SPJ -> Writer Any SPJ
+type SubstEnv = M.Map Var (M.Map AField Expr)
+flattenSPJ1 :: Var -> SQL -> SPJ -> Writer SubstEnv SPJ
 flattenSPJ1 source (ASPJ (SPJ {..})) parent = do
-  tell (Any True)
-  pure $ 
-      substSQL source proj parent
+  tell (M.singleton source proj)
+  pure $ parent
       & #wheres <>~ wheres
       & #sources <>~ sources
 flattenSPJ1 source sql parent = pure $ parent & #sources <>~ [(source, sql)]
-flattenSPJ :: SPJ -> Maybe SPJ
+flattenSPJ :: SPJ -> Maybe (Writer SubstEnv SPJ)
 flattenSPJ (SPJ { sources,.. }) = case runWriter $ foldrM (uncurry flattenSPJ1) (SPJ {sources=mempty,..}) sources of
-    (spj, Any True) -> Just spj
-    _ -> Nothing
+    (spj, m) 
+      | M.null m -> Nothing
+      | otherwise -> Just (tell m *> pure (substSQLs m spj))
 
 
 projMap :: SQL -> Maybe SQL
@@ -145,4 +159,8 @@ sinkWhere (ASPJ spj)
 sinkWhere _ = Nothing
 
 doFlattens :: Data a => a -> a
-doFlattens = runT' $ recurse >>> (tryTrans flattenGroupBy ||| tryTrans_ projMap ||| tryTrans_ sinkWhere ||| tryTrans_ flattenSPJ)
+doFlattens a = substSQLs sub out
+  where
+    -- it me
+    theTrans = recurse >>> (tryTrans_ flattenGroupBy ||| tryTrans_ projMap ||| tryTrans_ sinkWhere ||| tryTransM_ flattenSPJ)
+    (out, sub) = runWriter $ runT theTrans a
