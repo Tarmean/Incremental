@@ -168,6 +168,10 @@ tcExprW (Nest n) = do
   sourceTy <- tcLang n
   uv <- freshUVar
   pure $ setEType (Nest n) (ListTy uv (lTy sourceTy))
+tcExprW (Singular l) = do
+   l <- tcLang l
+   (sourceTy, retTy) <- unList (lTy l)
+   pure $ setEType (Singular l) retTy
 tcExprW (Lookup source args) = do
    sourceTy <- lookupVar (unSource source)
    args <- traverse tcExpr args
@@ -385,7 +389,7 @@ unify = go
       | tagL == tagR = TupleTyp tagL <$> (zipStrict l r & traverse (uncurry go))
     go l r 
       | l == r = pure l
-      -- | otherwise = pure l
+      | otherwise = pure l
       | otherwise = do
         ctx <- gets lastContext
         throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack <> "\nctx: " <> prettyS (l,r, ctx))

@@ -141,6 +141,7 @@ data Expr' (p::Phase) where
     AggrNested :: AggrOp -> (Lang' p) -> Expr' p
     Nest :: Lang' a -> Expr' a
     Lookup :: { lookupTable :: Source, lookupKeys :: [Expr' p] } -> Expr' p
+    Singular :: Lang' p -> Expr' p
     HasEType :: TypeStrictness -> Expr' p -> ExprType -> Expr' p
     Lit :: ALit -> Expr' p
 deriving instance Eq Expr
@@ -285,6 +286,7 @@ instance TraverseP Expr'  where
    traverseP f (Nest o) = Nest <$> f o
    traverseP f (HasEType r ex t) = HasEType r <$> traverseP f ex <*> pure t
    traverseP f (Lookup sym es) = Lookup sym <$> traverse (traverseP f) es
+   traverseP f (Singular e) = Singular <$> f e
    traverseP _ (Lit i) = pure (Lit i)
 (.==) :: Expr' p -> Expr' p -> Expr' p
 (.==) = BOp Eql
@@ -511,6 +513,7 @@ instance Pretty Expr where
     pretty (HasEType _ e ty) = pretty e <+> "::" <+> pretty ty
     pretty (Lookup v e) = pretty v <> pretty e
     pretty (Lit i) = pretty i
+    pretty (Singular e) = parens (pretty e)
 instance Pretty Lang where
     pretty (Bind a b c) = nest 6 $ group $ "for" <+> pretty b <+> "in" <+> optParens (align (pretty a)) <+> "{" <> (line <> pretty c) </> "}"
       where

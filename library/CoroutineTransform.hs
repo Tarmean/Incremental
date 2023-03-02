@@ -83,7 +83,7 @@ doAggregates (Source (Var i s)) aggs = [
   ]
   where
     p = Var i (s ++ "_proj")
-    aggregate agg = AggrTuple [BaseAg ScalarFD (Proj 0 2 (Ref p)),  BaseAg agg (Proj 1 2 (Ref p))]
+    aggregate agg = AggrTuple [BaseAg ScalarFD (Proj 0 2 (Ref p)),  AggrTuple [BaseAg agg (Proj 1 2 (Ref p))]]
     ctx = (KeyContext (S.fromList [Proj 0 2 (Ref p)]) True)
 
 loadInputs :: [Var] -> [(Source, [Projections])] -> Lang -> VarGenT Identity Lang

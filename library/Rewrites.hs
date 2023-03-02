@@ -319,6 +319,8 @@ locally m = do
   put old
   pure a
 
+
+
 inlineLets :: Data a => a -> a
 inlineLets = flip evalState mempty . runT (
   tryTransM @Lang (\rec -> \case
@@ -354,10 +356,10 @@ dropTopLevel a = a { defs = M.map dropDefs (defs a) }
 
 -- inlineReturns :: 
 
-lookupToLoop_ :: (Data a) => a -> a
-lookupToLoop_ a = runIdentity  . withVarGenT (maxVar a). lookupToLoop $ a
-lookupToLoop :: (Applicative m, Data a, MonadVar m) => a -> m a
-lookupToLoop a = do
+lookupToLoop :: (Data a) => a -> a
+lookupToLoop a = runIdentity  . withVarGenT (maxVar a). lookupToLoop_ $ a
+lookupToLoop_ :: (Applicative m, Data a, MonadVar m) => a -> m a
+lookupToLoop_ a = do
    (out, r) <- runWriterT (runT (tryTransM_ lowerLookup &&& (tryTransM insertBinds ||| recurse)) a)
    case r of
      [] -> pure out
@@ -376,3 +378,9 @@ lowerLookup (Lookup k expr) = Just $ do
   tell [(k, l, expr)]
   pure (Proj 1 2 (Ref l))
 lowerLookup _ = Nothing
+
+-- lowerLookupToSingular :: MonadVar m => Expr -> Maybe (m Expr)
+-- lowerLookupToSingular (Lookup s args) = Just $ do
+--   v <- genVar "l"
+--   pure (Proj 0 1 (Singular $ Bind (LRef (unSource s)) v (Filter (BOp Eql (Proj 0 2 (Ref v)) (tuple args)) (Return (tuple [Proj 1 2 (Ref v)])))))
+-- lowerLookupToSingular _ = Nothing

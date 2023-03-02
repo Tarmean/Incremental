@@ -29,7 +29,7 @@ toSPJ spj (Bind b v e) = toSPJ (spj { sources = (v,langToSQL b) : sources spj })
 toSPJ spj (Filter p e) = toSPJ (spj { wheres = exprToSQL p : spj.wheres}) e
 toSPJ spj (Return e) = case e of
   Tuple _ ls -> ASPJ $ spj {proj = toFieldMap $ map exprToSQL ls}
-  _ -> error "Illegal return"
+  e -> error ("LangToSQL: return not a tuple: " <> prettyS spj <> ", " <> prettyS e)
 toSPJ _spj (AsyncBind {}) = error "Illegal async bind"
 toSPJ _spj l@(LRef {}) = error ("LRef in return position" <> prettyS (_spj, l))
 toSPJ spj (OpLang ol) = case ol of
@@ -59,6 +59,7 @@ exprsToSQL = concatMap go
     go (Q.Tuple _ ls) = concatMap go ls
     go e = [exprToSQL e]
 exprToSQL :: CompileQuery.Expr -> SQL.Expr
+exprToSQL (Proj 0 1 (Q.Singular e)) = SQL.Singular (langToSQL e)
 exprToSQL (Proj i _ (Q.Ref v)) = SQL.Ref v (toField  i)
 exprToSQL (Q.BOp op l r) = SQL.BOp op (exprToSQL l) (exprToSQL r)
 exprToSQL (Lookup sym args) = SQL.Singular $ ASPJ $ SPJ

@@ -58,6 +58,7 @@ mergeSlice :: Expr -> Maybe Expr
 mergeSlice (Slice i _ total (Slice k l _ e)) = Just $ Slice (i+k) l total e
 mergeSlice (Slice i _ total (Proj k _ e)) = Just $ Proj (i+k) total e
 mergeSlice (Proj i _ (Slice off _ total e)) = Just $ Proj (i+off) total e
+mergeSlice (Proj i _ (Tuple _ ls)) = Just $ ls !! i
 mergeSlice _ = Nothing
 
 sliceToTuple :: Expr -> Maybe Expr
@@ -114,7 +115,7 @@ flattenAggr _ = Nothing
 flattenOps :: Expr -> Maybe Expr
 flattenOps (BOp Eql l r)
   | Just len <- shouldSplit l
-  = Just $ tuple [BOp Eql (tryMergeSlice $ Proj i len l) (tryMergeSlice $ Proj i len r) | i <- [0..len-1]]
+  = Just $ foldr1 (BOp And) [BOp Eql (tryMergeSlice $ Proj i len l) (tryMergeSlice $ Proj i len r) | i <- [0..len-1]]
 flattenOps _ = Nothing
 -- | Is this a tuple?
 shouldSplit :: Expr -> Maybe Int
