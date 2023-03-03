@@ -16,6 +16,7 @@ import ValueNaming (doHoistLevels)
 import LangToSQL (langToSQL)
 import SQL (SQL,doFlattens)
 import MergeSQLJoins (mergeGroupBys)
+mergeGroupingOps :: a -> a
 mergeGroupingOps = id
 
 runTest :: DSL [a] -> TopLevel

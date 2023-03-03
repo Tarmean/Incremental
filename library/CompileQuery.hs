@@ -539,17 +539,17 @@ instance Pretty OpLang where
     pretty (Let v e b) = "let" <+> pretty v <+> ":=" <+> pretty e <> flatAlt line " in " <> pretty b
     pretty (Fold bound groupBy res body)
         = group $ hang 2 $
-            group ("fold" </> parens (pretty bound <> " in " <> pretty body) </> pretty groupBy) </> (pretty res)
+            group ("fold" </> parens (pretty bound <> " in " <> pretty body) </> pretty groupBy) </> pretty res
     pretty (HasType Inferred e t) = parens $ pretty e <+> ":::" <+> pretty t
     pretty (HasType _ e t) = pretty e <+> "::" <+> pretty t
     pretty (Call e) = "?" <> pretty e
     pretty (Force t) = "!" <> pretty t
     pretty (Distinct t) = "Distinct" <+> pretty t
 instance Pretty a => Pretty (TopLevel' a) where
-    pretty (TopLevel ds root) = nest 2 $ "let" </> (vsep (prettyAssignments ds)) </> "in " </> pretty root
+    pretty (TopLevel ds root) = nest 2 $ "let" </> vsep (prettyAssignments ds) </> "in " </> pretty root
       where
 
-        prettyAssignments m = [pretty k <> prettyVars vars <+> group (nest 4 ("=" </>  (pretty v))) | (k, (vars,v)) <- M.toList m]
+        prettyAssignments m = [pretty k <> prettyVars vars <+> group (nest 4 ("=" </>  pretty v)) | (k, (vars,v)) <- M.toList m]
         prettyVars [] = mempty
         prettyVars vs = list (map pretty vs)
 

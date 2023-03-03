@@ -17,6 +17,7 @@ import Data.Data(Data)
 import Data.Typeable ((:~:)(Refl), eqT)
 import OpenRec
 import GHC.Stack
+import Data.Traversable (for)
 
 data HashConsEnv
     = HashConsEnv
@@ -130,7 +131,7 @@ insertLevels levels env = addRoot . runT' (
 
 doHoistLevels :: TopLevel -> TopLevel
 doHoistLevels tl = runIdentity $ withVarGenT (maxVar tl) $ do
-    defs' <- flip traverse (defs tl) $ \(args,l) -> do
+    defs' <- for (defs tl) $ \(args,l) -> do
         l <- hoistLevels l
         pure (args, l)
     pure tl { defs = defs' }

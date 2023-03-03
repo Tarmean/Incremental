@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 module LangToSQL where
 
-import Util (prettyS)
 import CompileQuery
 import qualified CompileQuery as Q
 import SQL
@@ -29,19 +28,16 @@ toSPJ spj (Bind b v e) = toSPJ (spj { sources = (v,langToSQL b) : sources spj })
 toSPJ spj (Filter p e) = toSPJ (spj { wheres = exprToSQL p : spj.wheres}) e
 toSPJ spj (Return e) = case e of
   Tuple _ ls -> ASPJ $ spj {proj = toFieldMap $ map exprToSQL ls}
-  e -> error ("LangToSQL: return not a tuple: " <> prettyS spj <> ", " <> prettyS e)
+  _ -> error ("LangToSQL: return not a tuple: " <> prettyS spj <> ", " <> prettyS e)
 toSPJ _spj (AsyncBind {}) = error "Illegal async bind"
 toSPJ _spj l@(LRef {}) = error ("LRef in return position" <> prettyS (_spj, l))
-toSPJ spj (OpLang ol) = case ol of
-   _ -> error ("Compilation failure" <> prettyS (spj, ol))
-   Let {} -> error "Compilation failure"
-   Unpack {} -> error "Compilation failure"
-   Call {} -> error "Compilation failure"
-   Force {} -> error "Compilation failure"
-   HasType _ l _ -> toSPJ spj l
-   o -> makeLateral spj o
-toField :: Int -> String
-toField i = "f" <> show i
+toSPJ spj (OpLang ol) = error ("Compilation failure" <> prettyS (spj, ol))
+   -- Let {} -> error "Compilation failure"
+   -- Unpack {} -> error "Compilation failure"
+   -- Call {} -> error "Compilation failure"
+   -- Force {} -> error "Compilation failure"
+   -- HasType _ l _ -> toSPJ spj l
+   -- o -> makeLateral spj o
 
 makeLateral :: SPJ -> OpLang -> SQL
 makeLateral _spj _ol = error ("makeLateral, Not Implemented yet" <> prettyS (_spj, _ol))
@@ -49,8 +45,6 @@ makeLateral _spj _ol = error ("makeLateral, Not Implemented yet" <> prettyS (_sp
 aggrToSQL :: CompileQuery.AnAggregate -> M.Map AField SQL.Expr
 aggrToSQL = toFieldMap . toExpressions
 
-toFieldMap :: [SQL.Expr] -> M.Map AField SQL.Expr
-toFieldMap = M.fromList . zip (toField <$> [0::Int ..])
 
 
 exprsToSQL :: [CompileQuery.Expr] -> [SQL.Expr]
@@ -72,7 +66,7 @@ exprToSQL (Q.Lit l) = SQL.Lit l
 exprToSQL o = error ("Unimplemented exprToSQL: " <> prettyS o)
 
 toTable :: Var -> SQL
-toTable sym = Table (Q.TableMeta (Q.FD []) []) (prettyS sym)
+toTable sym = Table (Q.TableMeta (Q.FD [["f2"]]) ["f0", "f1", "f2"]) (prettyS sym)
 
 toExpressions :: CompileQuery.AnAggregate -> [SQL.Expr]
 toExpressions (CompileQuery.AggrTuple ls) = concatMap toExpressions ls

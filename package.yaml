@@ -37,6 +37,8 @@ library:
   - transformers
   - bytestring
   - datafix
+  - fgl
+  - graphviz
   source-dirs: library
 
 executables:

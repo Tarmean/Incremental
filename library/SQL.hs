@@ -18,7 +18,6 @@ import Prettyprinter
 import qualified Data.Set as S
 import Control.Monad.Trans.Writer.CPS
 import Data.Either (partitionEithers)
-import Data.Monoid (Any(..))
 import Data.Foldable (foldrM)
 import qualified CompileQuery as Q
 
@@ -33,6 +32,12 @@ data SQL = ASPJ SPJ
          | OrderBy { by :: [Expr], source :: SQL }
   deriving (Show, Eq, Ord, Data, Generic)
 type AField = String
+
+toField :: Int -> String
+toField i = "f" <> show i
+toFieldMap :: [SQL.Expr] -> M.Map AField SQL.Expr
+toFieldMap = M.fromList . zip (toField <$> [0::Int ..])
+
 data Expr = BOp Q.BOp Expr Expr | Ref Var AField | AggrOp Q.AggrOp Expr | Singular SQL | Lit Q.ALit
   deriving (Show, Eq, Ord, Data, Generic)
 instance Pretty SQL where
@@ -64,7 +69,7 @@ instance Pretty SPJ where
           | otherwise = pretty p
 
 instance Pretty Expr where
-    pretty (BOp op a b) = pretty a <+> pretty op <+> pretty b
+    pretty (BOp f a b) = pretty a <+> pretty f <+> pretty b
     pretty (Ref v s) = pretty v <> "." <> pretty s
     pretty (AggrOp Q.ScalarFD o) = pretty o
     pretty (AggrOp top o) = pretty top <> parens (pretty o)
@@ -107,7 +112,7 @@ flattenSPJ :: SPJ -> Maybe (Writer SubstEnv SPJ)
 flattenSPJ (SPJ { sources,.. }) = case runWriter $ foldrM (uncurry flattenSPJ1) (SPJ {sources=mempty,..}) sources of
     (spj, m) 
       | M.null m -> Nothing
-      | otherwise -> Just (tell m *> pure (substSQLs m spj))
+      | otherwise -> Just (substSQLs m spj <$ tell m)
 
 
 projMap :: SQL -> Maybe SQL
@@ -116,10 +121,38 @@ projMap (ASPJ SPJ { sources = [(k,v)], proj, wheres }) = mapSPJ transSPJ v
   transSPJ spj = spj { proj = substSQL k spj.proj proj, wheres = spj.wheres <> substSQL k spj.proj wheres }
 projMap _ = Nothing
 
+-- | Fixme:
+-- This is used to move joins inside a complex subquery.
+-- We should only do this if the join
+-- - Doesn't use positional logic such as window functions or sql procs
+-- - Doesn't use lateral joins because otherwise we 'infect' non-lateral subqueries
 mapSPJ :: (SPJ -> SPJ) -> SQL -> Maybe SQL
 mapSPJ f (ASPJ s)= Just $ ASPJ (f s)
 mapSPJ f (GroupQ ons c) = GroupQ ons <$> mapSPJ f c
 mapSPJ _ _ = Nothing
+
+traverseSPJ :: Applicative m => (SPJ -> m SPJ) -> SQL -> m SQL
+traverseSPJ f (ASPJ s)= ASPJ <$> f s
+traverseSPJ f (GroupQ ons c) = GroupQ ons <$> traverseSPJ f c
+traverseSPJ f (DistinctQ c) = DistinctQ <$> traverseSPJ f c
+traverseSPJ f (Slice l r c) = Slice l r <$> traverseSPJ f c
+traverseSPJ f (OrderBy by c) = OrderBy by <$> traverseSPJ f c
+traverseSPJ _ t@Table{} = pure t
+
+selectOf :: SQL -> M.Map AField Expr
+selectOf (ASPJ SPJ { proj }) = proj
+selectOf (GroupQ _ons c) = selectOf c
+selectOf (DistinctQ c) = selectOf c
+selectOf (Slice _l _r c) = selectOf c
+selectOf (OrderBy _by c) = selectOf c
+selectOf (Table meta name) = toFieldMap [ Ref (Var 0 name) f | f <- fields meta ]
+traverseSPJ_ :: Applicative m => (SPJ -> m ()) -> SQL -> m ()
+traverseSPJ_ f (ASPJ s)= f s
+traverseSPJ_ f (GroupQ _ons c) = traverseSPJ_ f c
+traverseSPJ_ f (DistinctQ c) = traverseSPJ_ f c
+traverseSPJ_ f (Slice _l _r c) = traverseSPJ_ f c
+traverseSPJ_ f (OrderBy _by c) = traverseSPJ_ f c
+traverseSPJ_ _ Table{} = pure ()
 
 
 flattenGroupBy :: SQL -> Maybe SQL

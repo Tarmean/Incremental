@@ -45,6 +45,15 @@ data FEnv n = FEnv {
    pending :: !(S.Set n)
  } deriving (Eq, Ord, Show, Generic)
 
+instance Ord n => Semigroup (FEnv n) where
+   l <> r = FEnv {
+      active = active l <> active r,
+      watchList = watchList l <!> watchList r,
+      unitProps = unitProps l <!> unitProps r,
+      pending = pending l <> pending r
+    }
+    where (<!>) = M.unionWith (error "Collision in FEnv semigroup")
+
 isActive :: Ord n => n -> FEnv n -> Bool
 isActive v env = S.member v (active env)
 process :: (Ord n, Foldable t, Show n) => t n -> FEnv n -> FEnv n
