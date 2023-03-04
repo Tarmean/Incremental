@@ -35,7 +35,7 @@ import CompileQuery ((</>))
 import Data.Either (partitionEithers)
 import Data.Bifunctor (second)
 
-data AClause n = AClause !n !(S.Set n)
+data AClause n = AClause !n !(S.Set n) String
   deriving (Eq, Ord, Show)
 
 data FEnv n = FEnv {
@@ -91,13 +91,13 @@ fromClauses c = execState (mapM_ makeWatch otherClauses) FEnv {active = mempty, 
   where
     unitprops = M.fromListWith (<>) $ map (second S.singleton) unitClauses
     (unitClauses, otherClauses) = partitionEithers $ map isUnit c
-    isUnit cls@(AClause t s)
+    isUnit cls@(AClause t s _)
       | S.size s == 1
       , [x] <- S.toList s = Left (x, t)
       | otherwise = Right cls
 
 makeWatch :: (Ord n, MonadState (FEnv n) m) => AClause n -> m ()
-makeWatch c@(AClause vid clause) = do
+makeWatch c@(AClause vid clause _) = do
   seen <- use #active
   unless (S.member vid seen) do
      case S.toList (clause S.\\ seen) of
@@ -126,4 +126,4 @@ instance Pretty n => Pretty (FEnv n) where
        "units" <+> "=" <+> list [pretty k <+> "->" <> tupled (pretty <$> S.toList v) | (k,v) <- M.toList units] <> "," </> 
        "pending" <+> "=" <+> pretty (S.toList pending) </> "}")
 instance Pretty n => Pretty (AClause n) where
-   pretty (AClause n s) = tupled [pretty a | a <- S.toList s] <+> "->" <+> pretty n
+   pretty (AClause n s _) = tupled [pretty a | a <- S.toList s] <+> "->" <+> pretty n

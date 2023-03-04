@@ -3,6 +3,7 @@
 {-# LANGUAGE BlockArguments, LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+-- TODO: Add reasoning about equality
 -- | Hunt down SQL fundeps
 --
 -- Problem:
@@ -55,7 +56,6 @@ import Prettyprinter
 import qualified CompileQuery as Q
 import RenderHypergraph (toFgl, renderGraph)
 import GHC.IO (unsafePerformIO)
-import Debug.Trace (traceM)
 import GHC.Stack (HasCallStack)
 import Data.Monoid (Ap(..))
 
@@ -78,12 +78,12 @@ instance Pretty NId where
         Root -> "Root"
         a :. b -> pretty a <> "." <> pretty b
         ARef a -> pretty a
-pattern (:-) :: Ord n => n -> [n] -> AClause n
-pattern (:-) a b  <- (makeFrom -> (a,b))
+pattern (:-) :: Ord n => n -> [n] -> String -> AClause n
+pattern (:-) a b lab <- (makeFrom -> (a,b,lab))
   where
-    (:-) nId nids = AClause nId (S.fromList nids)
-makeFrom :: AClause n -> (n, [n])
-makeFrom (AClause a b) = (a, S.toList b)
+    (:-) nId nids lab = AClause nId (S.fromList nids) lab
+makeFrom :: AClause n -> (n, [n], String)
+makeFrom (AClause a b lab) = (a, S.toList b, lab)
 
 
 newtype Env = Env {
@@ -93,10 +93,9 @@ newtype Env = Env {
 {-# NOINLINE traceGraph #-}
 traceGraph :: [AClause NId] -> a -> a
 traceGraph g out = unsafePerformIO (do
-   traceM (prettyS g)
    dropDot g) `seq` out
 dropDot :: [AClause NId] -> IO ()
-dropDot dots = renderGraph (toFgl [ (l,S.toList rs) | AClause l rs <- dots ]) "dump.svg"
+dropDot dots = renderGraph (toFgl [ (l,S.toList rs, lbl) | AClause l rs lbl <- dots ]) "dump.svg"
 
 -- [Note: isLocalSource]
 --
@@ -175,7 +174,7 @@ makeGraph self (ASPJ spj) = do
         -- See [Note: Determining SPJ nodes]
         --
         -- forM_ (M.keys spj.proj)$ \x -> (self :. x) .- [self]
-        self <-> [ARef k | (k,_) <- spj.sources]
+        (self <-> [ARef k | (k,_) <- spj.sources]) "FROM"
         forM_ (M.toList spj.proj) $ \(k,v) -> do
             mkExpr (self :. k) v
         forM_ spj.sources $ \(k,v) -> do
@@ -187,17 +186,17 @@ makeGraph self (ASPJ spj) = do
                 | isLocalSource l || isLocalSource r -> do
                   l <- resolveLocal l
                   r <- resolveLocal r
-                  (l :. x) <-> [r :. y]
+                  ((l :. x) <-> [r :. y]) "WHERE{=}"
               _ -> pure ()
 makeGraph self (DistinctQ e) = do
     makeGraph self e
-    self <-> [self :. k | k <- M.keys (selectOf e)]
+    (self <-> [self :. k | k <- M.keys (selectOf e)]) "DISTINCT"
 makeGraph self (Slice _ _ e) = makeGraph self e
 makeGraph self table@(Table (TableMeta (FD fds) fields) _) = do
     when (null fields) (error $ "Table with no fields" <> show table)
     -- self <-> [self :. field | field <- fields]
-    forM_ fields $ \field -> (self :. field) .- [self]
-    forM_ fds $ \fd -> self .- [self :. f | f <- fd]
+    forM_ fields $ \field -> ((self :. field) .- [self]) "Table{field}"
+    forM_ fds $ \fd -> (self .- [self :. f | f <- fd]) "Table{FD}"
 -- FIXME: this isn't quite accurate. The identity of a group-by tuple does not determine the identity of the grouped tuple
 -- In fact it doesn't even work the other way around, with cube or rollup queries we can end up with more tuples than we started with
 makeGraph self (GroupQ groups source) = do
@@ -205,16 +204,16 @@ makeGraph self (GroupQ groups source) = do
    -- the scoping is a bit weird, though
    -- groupDeps <- traverse depsFor groups
    os <- forM groups $ \case
-      Ref k v -> Just [ARef k :. v] <$ (ARef k :. v) .- [self]
+      Ref k v -> Just [ARef k :. v] <$ ((ARef k :. v) .- [self]) "groupBy{result->key}"
       o -> collectDeps o
    case sequence os of
-     Just os -> self .- concat os
+     Just os -> (self .- concat os) "groupBy{key->result}"
      Nothing -> pure ()
    -- See [Note: Passing self for GroupQ]
    -- makeGraph self source
    makeGraph (self :. "$inner") source
    forM_ (M.keys $ selectOf source) $ \fld -> do
-      ((self :. "$inner") :. fld) <-> [self :. fld]
+      (((self :. "$inner") :. fld) <-> [self :. fld]) "GroupBy{inner loop}"
 
 -- [Note: Passing self for GroupQ]
 -- Grouping gives us two nodes: The outer aggregate result, and the inner aggregated tuple.
@@ -243,20 +242,20 @@ collectDeps e = fmap getAp . execWriterT $ runT (
 
 mkExpr :: NId -> Expr -> M ()
 mkExpr nid e = collectDeps e >>= \case
-   Just deps -> nid .- deps
+   Just deps -> (nid .- deps) ("SELECT{"<>prettyS e<>"}")
    Nothing -> pure ()
 
 resolveLocal :: MonadReader (M.Map Var NId) m => Var -> m NId
 resolveLocal s = asks (M.findWithDefault (ARef s) s)
 
-(<->) :: HasCallStack => NId -> [NId] -> M ()
-(<->) l rs 
+(<->) :: HasCallStack => NId -> [NId] -> String -> M ()
+(<->) l rs lab
   | null rs = error ("illegal <->" <> show l)
   | otherwise = do
-   l .- rs
-   forM_ rs $ \r -> r .- [l]
-(.-) :: HasCallStack => NId -> [NId] -> M ()
-(.-) k v
+   (l .- rs) (lab <> " (->)")
+   forM_ rs $ \r -> (r .- [l]) (lab <> " (<-)")
+(.-) :: HasCallStack => NId -> [NId] -> String -> M ()
+(.-) k v lab
   | null v = error ("illegal .-" <> show k)
   | otherwise = do
-      modify $ \s -> s { constraints = (k :- v) :constraints s }
+      modify $ \s -> s { constraints = (k :- v) lab :constraints s }
