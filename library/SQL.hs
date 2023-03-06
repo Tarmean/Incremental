@@ -18,8 +18,8 @@ import Prettyprinter
 import qualified Data.Set as S
 import Control.Monad.Trans.Writer.CPS
 import Data.Either (partitionEithers)
-import Data.Monoid (Any(..))
 import Data.Foldable (foldrM)
+import qualified CompileQuery as Q
 
 data SPJ = SPJ { sources :: [(Var, SQL)], wheres :: [Expr], proj :: M.Map AField Expr }
   deriving (Show, Eq, Ord, Data, Generic)
@@ -28,17 +28,23 @@ data SQL = ASPJ SPJ
          | GroupQ { groups :: [Expr], source :: SQL }
          | Table TableMeta String
          | Slice { limit :: Maybe Int,  offset :: Maybe Int, source :: SQL }
+         | DistinctQ { source :: SQL }
          | OrderBy { by :: [Expr], source :: SQL }
   deriving (Show, Eq, Ord, Data, Generic)
 type AField = String
-data Expr = Eql Expr Expr | Ref Var AField | AggrOp AnOp Expr
-  deriving (Show, Eq, Ord, Data, Generic)
-data AnOp = SumO | MaxO
+
+toField :: Int -> String
+toField i = "f" <> show i
+toFieldMap :: [SQL.Expr] -> M.Map AField SQL.Expr
+toFieldMap = M.fromList . zip (toField <$> [0::Int ..])
+
+data Expr = BOp Q.BOp Expr Expr | Ref Var AField | AggrOp Q.AggrOp Expr | Singular SQL | Lit Q.ALit
   deriving (Show, Eq, Ord, Data, Generic)
 instance Pretty SQL where
     pretty (Table _ name) = pretty name
     pretty (GroupQ g e) = align $ group $ pretty e <> line <> "GROUP BY " <> tupled (map pretty g)
     pretty (ASPJ spj) = pretty spj
+    pretty (DistinctQ spj) = "DISTINCT " <> pretty spj
     pretty (Slice lim off e) = align $ group $ pretty e <> line <> limPart <> offPart
       where
         limPart = maybe "" (\l -> "LIMIT " <> pretty l) lim
@@ -62,14 +68,27 @@ instance Pretty SPJ where
           | isComplex p = parens (pretty p)
           | otherwise = pretty p
 
-instance Pretty AnOp where
-    pretty SumO = "SUM"
-    pretty MaxO = "MAX"
 instance Pretty Expr where
-    pretty (Eql a b) = pretty a <+> "=" <+> pretty b
+    pretty (BOp f a b) = pretty a <+> pretty f <+> pretty b
     pretty (Ref v s) = pretty v <> "." <> pretty s
+    pretty (AggrOp Q.ScalarFD o) = pretty o
     pretty (AggrOp top o) = pretty top <> parens (pretty o)
+    pretty (Singular sql) = parens (pretty sql)
+    pretty (Lit a) = pretty a
 
+substSQLs :: Data a => M.Map Var (M.Map AField Expr) -> a -> a
+substSQLs m a
+  | M.null m = a
+substSQLs fields a = runT' (
+   tryTransM @Expr (\rec -> \case
+       Ref v' f
+         -> case fields M.!? v' of
+            Nothing -> Nothing
+            Just m' -> case m' M.!? f  of
+               Just f' -> Just (rec f')
+               Nothing -> error ("substSQL: field not found: " <> show (m', f, fields))
+       _ -> Nothing)
+  ||| recurse) a
 substSQL :: Data a => Var -> M.Map AField Expr -> a -> a
 substSQL v fields = runT' (
    tryTrans_ @Expr \case
@@ -81,18 +100,19 @@ substSQL v fields = runT' (
        _ -> Nothing
   ||| recurse)
 
-flattenSPJ1 :: Var -> SQL -> SPJ -> Writer Any SPJ
+type SubstEnv = M.Map Var (M.Map AField Expr)
+flattenSPJ1 :: Var -> SQL -> SPJ -> Writer SubstEnv SPJ
 flattenSPJ1 source (ASPJ (SPJ {..})) parent = do
-  tell (Any True)
-  pure $ 
-      substSQL source proj parent
+  tell (M.singleton source proj)
+  pure $ parent
       & #wheres <>~ wheres
       & #sources <>~ sources
 flattenSPJ1 source sql parent = pure $ parent & #sources <>~ [(source, sql)]
-flattenSPJ :: SPJ -> Maybe SPJ
+flattenSPJ :: SPJ -> Maybe (Writer SubstEnv SPJ)
 flattenSPJ (SPJ { sources,.. }) = case runWriter $ foldrM (uncurry flattenSPJ1) (SPJ {sources=mempty,..}) sources of
-    (spj, Any True) -> Just spj
-    _ -> Nothing
+    (spj, m) 
+      | M.null m -> Nothing
+      | otherwise -> Just (substSQLs m spj <$ tell m)
 
 
 projMap :: SQL -> Maybe SQL
@@ -101,10 +121,38 @@ projMap (ASPJ SPJ { sources = [(k,v)], proj, wheres }) = mapSPJ transSPJ v
   transSPJ spj = spj { proj = substSQL k spj.proj proj, wheres = spj.wheres <> substSQL k spj.proj wheres }
 projMap _ = Nothing
 
+-- | Fixme:
+-- This is used to move joins inside a complex subquery.
+-- We should only do this if the join
+-- - Doesn't use positional logic such as window functions or sql procs
+-- - Doesn't use lateral joins because otherwise we 'infect' non-lateral subqueries
 mapSPJ :: (SPJ -> SPJ) -> SQL -> Maybe SQL
 mapSPJ f (ASPJ s)= Just $ ASPJ (f s)
 mapSPJ f (GroupQ ons c) = GroupQ ons <$> mapSPJ f c
 mapSPJ _ _ = Nothing
+
+traverseSPJ :: Applicative m => (SPJ -> m SPJ) -> SQL -> m SQL
+traverseSPJ f (ASPJ s)= ASPJ <$> f s
+traverseSPJ f (GroupQ ons c) = GroupQ ons <$> traverseSPJ f c
+traverseSPJ f (DistinctQ c) = DistinctQ <$> traverseSPJ f c
+traverseSPJ f (Slice l r c) = Slice l r <$> traverseSPJ f c
+traverseSPJ f (OrderBy by c) = OrderBy by <$> traverseSPJ f c
+traverseSPJ _ t@Table{} = pure t
+
+selectOf :: SQL -> M.Map AField Expr
+selectOf (ASPJ SPJ { proj }) = proj
+selectOf (GroupQ _ons c) = selectOf c
+selectOf (DistinctQ c) = selectOf c
+selectOf (Slice _l _r c) = selectOf c
+selectOf (OrderBy _by c) = selectOf c
+selectOf (Table meta name) = toFieldMap [ Ref (Var 0 name) f | f <- fields meta ]
+traverseSPJ_ :: Applicative m => (SPJ -> m ()) -> SQL -> m ()
+traverseSPJ_ f (ASPJ s)= f s
+traverseSPJ_ f (GroupQ _ons c) = traverseSPJ_ f c
+traverseSPJ_ f (DistinctQ c) = traverseSPJ_ f c
+traverseSPJ_ f (Slice _l _r c) = traverseSPJ_ f c
+traverseSPJ_ f (OrderBy _by c) = traverseSPJ_ f c
+traverseSPJ_ _ Table{} = pure ()
 
 
 flattenGroupBy :: SQL -> Maybe SQL
@@ -144,4 +192,8 @@ sinkWhere (ASPJ spj)
 sinkWhere _ = Nothing
 
 doFlattens :: Data a => a -> a
-doFlattens = runT' $ recurse >>> (tryTrans flattenGroupBy ||| tryTrans_ projMap ||| tryTrans_ sinkWhere ||| tryTrans_ flattenSPJ)
+doFlattens a = substSQLs sub out
+  where
+    -- it me
+    theTrans = recurse >>> (tryTrans_ flattenGroupBy ||| tryTrans_ projMap ||| tryTrans_ sinkWhere ||| tryTransM_ flattenSPJ)
+    (out, sub) = runWriter $ runT theTrans a

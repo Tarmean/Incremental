@@ -7,10 +7,8 @@ module HoistThunks where
 import CompileQuery
 import OpenRec
 import Rewrites
-import Data.Functor.Identity (Identity (runIdentity))
 import Control.Monad.Writer.Strict (WriterT(..), tell)
 import Data.Data (Data)
-import Control.Monad
 import Control.Lens
 import Control.Monad.State.Strict
 import qualified Data.Map as M
@@ -60,15 +58,15 @@ gatherThunks = runWriterT . runT
               v <- genVar "t"
               tell [(v, Nothing, sym, fmap Ref args)]
               pure (Bind (LRef (unSource sym)) v 
-                      (Filter (BOp Eql (Proj 0 2 (Ref v)) (Tuple (fmap Ref args))) (Return (Proj 1 2 (Ref v)))))
-            OpLang (Call (HasEType _ e (ListTy (SourceTy sym) (TupleTyp ls)))) -> Just $ do
+                      (Filter (BOp Eql (Proj 0 2 (Ref v)) (tuple (fmap Ref args))) (Return (Proj 1 2 (Ref v)))))
+            OpLang (Call (HasEType _ e (ListTy (SourceTy sym) (TupleTyp tag ls)))) -> Just $ do
               v <- genVar "t"
               let tot = length ls
               let args = [Proj i tot e | i <- [0..tot-1]]
               tell [(v, Nothing, sym, args)]
               pure (
                 Bind (LRef (unSource sym)) v 
-                      (Filter (BOp Eql (Proj 0 2 (Ref v)) (Tuple args)) (Return (Proj 1 2 (Ref v)))))
+                      (Filter (BOp Eql (Proj 0 2 (Ref v)) (Tuple tag args)) (Return (Proj 1 2 (Ref v)))))
 
             _ -> Nothing
     ||| recurse

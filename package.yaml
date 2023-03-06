@@ -35,8 +35,6 @@ library:
   - ghc-prim
   - generic-lens
   - transformers
-  - bytestring
-  - hegg
   - datafix
   source-dirs: library
 

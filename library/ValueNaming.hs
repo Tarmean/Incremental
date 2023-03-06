@@ -7,7 +7,6 @@ module ValueNaming where
 import qualified Data.Map.Strict as M
 import Data.Functor.Identity
 import qualified Data.Set as S
-import Util
 import qualified Data.Map.Lazy as ML
 import Control.Monad.State.Strict
 import Control.Monad.Reader
@@ -18,6 +17,7 @@ import Data.Data(Data)
 import Data.Typeable ((:~:)(Refl), eqT)
 import OpenRec
 import GHC.Stack
+import Data.Traversable (for)
 
 data HashConsEnv
     = HashConsEnv
@@ -131,7 +131,7 @@ insertLevels levels env = addRoot . runT' (
 
 doHoistLevels :: TopLevel -> TopLevel
 doHoistLevels tl = runIdentity $ withVarGenT (maxVar tl) $ do
-    defs' <- flip traverse (defs tl) $ \(args,l) -> do
+    defs' <- for (defs tl) $ \(args,l) -> do
         l <- hoistLevels l
         pure (args, l)
     pure tl { defs = defs' }

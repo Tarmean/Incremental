@@ -27,7 +27,34 @@ import Data.List (intersperse)
 import Util
 import Data.Maybe (catMaybes)
 import Data.Functor.Identity (runIdentity)
+import qualified Data.ByteString.Char8 as BS
 
+-- Plan for aggregates:
+--
+-- Do a Fold operation+monoid decorators. Tuples of monoids form a monoid. Aggregates like sum or window functions are monoids.
+--
+-- But we extend SQL:
+--
+-- - Singleton maps are built like `key := someMonoidValue` and form monoids
+-- - list(expr) and set(expr) are monoids which stand for collections
+--
+-- We do not get flat values for everything.
+-- The solution is that Folds of tuples are tuples of Folds. We
+--
+-- - For each key prefix we generate a Fold
+-- - for collection aggregates we define a thunk+toplevel function
+--
+-- [keys := list(s)]_env => Thunk(new_thunk, [])
+--    def new_thunk(): for ps in env: yield [keys, s]
+--
+-- Map results are just tables with extra columns for the keys. We support
+--
+-- - indexing
+-- - toList
+--
+-- toList forces the thunk.
+-- indexing is a lookup op, but what if the result is another collection? Then we generate a new thunk with a function which forces+filters the indexed thunk.
+-- This requires type information, though
 
 
 -- | AST's are tagged by a `phase` parameter.
@@ -39,7 +66,7 @@ import Data.Functor.Identity (runIdentity)
 --
 -- Only `Lang' p` is a GADT which uses the parameter, which makes the mutually recursive
 class TraverseP f where
-   traverseP :: (HasCallStack, Applicative m) => (Lang' p -> m (Lang' q)) -> f p -> m (f q)
+   traverseP :: (HasCallStack, Applicative m) => (Lang' p -> m (Lang' 'Flat)) -> f p -> m (f 'Flat)
 
 
 -- [Note: Observable sharing]
@@ -81,6 +108,26 @@ a </> b = a <> line <> b
 instance Pretty Thunk where
     pretty (Thunk s as) = pretty s <> tupled (map pretty as)
 
+
+data ConstrTag = ConstrTag { conName :: BS.ByteString, conArity :: Int }
+  deriving (Eq, Ord, Show, Data)
+
+tuple :: [Expr' r] -> Expr' r
+tuple ls = Tuple (tupleTag (length ls)) ls
+tupleTyp :: [ExprType] -> ExprType
+tupleTyp ls = TupleTyp (tupleTag (length ls)) ls
+tupleTag :: Int -> ConstrTag
+tupleTag = ConstrTag "Tuple"
+isTupleTag :: ConstrTag -> Bool
+isTupleTag (ConstrTag "Tuple" _) = True
+isTupleTag _ = False
+
+
+instance Pretty ConstrTag where
+    pretty c
+      | isTupleTag c = ""
+      | otherwise = pretty (BS.unpack $ conName c)
+
 -- | AST for Expression language
 data Expr' (p::Phase) where
     Ref :: Var -> Expr' p
@@ -89,17 +136,135 @@ data Expr' (p::Phase) where
     Slice :: Int -> Int -> Int -> (Expr' p) -> Expr' p
     BOp :: BOp -> Expr' p -> Expr' p -> Expr' p
     Unit :: Expr' p
-    Tuple :: [Expr' p] -> Expr' p
+    Tuple :: ConstrTag -> [Expr' p] -> Expr' p
     Aggr :: AggrOp -> Thunk -> Expr' p
     AggrNested :: AggrOp -> (Lang' p) -> Expr' p
     Nest :: Lang' a -> Expr' a
     Lookup :: { lookupTable :: Source, lookupKeys :: [Expr' p] } -> Expr' p
+    Singular :: Lang' p -> Expr' p
     HasEType :: TypeStrictness -> Expr' p -> ExprType -> Expr' p
     Lit :: ALit -> Expr' p
 deriving instance Eq Expr
 deriving instance Ord Expr
 deriving instance Show Expr
 deriving instance Data Expr
+
+
+-- | Base aggregates enriched
+data AnAggregate' (p :: Phase)
+    = BaseAg AggrOp (Expr' p) -- ^ Base aggregate, e.g. SUM(cost)
+    | MapOf (Expr' p) (AnAggregate' p) -- ^ Grouping aggregate, (M.singleton k v). Merging a map merges the matching keys
+    | AggrTuple [AnAggregate' p] -- ^ A tuple-aggregate produces a tuple of aggregates 
+    | ListOf (Expr' p) -- ^ Not an aggregate as such, produces in a table reference
+    | SetOf (Expr' p) -- ^ ListOf with @distinct@ on top
+    -- | WindowFun  -- | Todo
+instance TraverseP AnAggregate' where
+    traverseP f (BaseAg op e) = BaseAg op <$> traverseP f e
+    traverseP f (MapOf e ag) = MapOf <$> traverseP f e <*> traverseP f ag
+    traverseP f (AggrTuple ags) = AggrTuple <$> traverse (traverseP f) ags
+    traverseP f (ListOf e) = ListOf <$> traverseP f e
+    traverseP f (SetOf e) = SetOf <$> traverseP f e
+instance Pretty AnAggregate where
+    pretty (BaseAg op e) = pretty op <> parens (pretty e)
+    pretty (MapOf e ag) = pretty e <> " := " <> pretty ag
+    pretty (AggrTuple ags) = tupled $ map pretty ags
+    pretty (ListOf e) = "list" <> parens (pretty e)
+    pretty (SetOf e) = "set" <> parens (pretty e)
+deriving instance Eq AnAggregate
+deriving instance Ord AnAggregate
+deriving instance Show AnAggregate
+deriving instance Data AnAggregate
+type AnAggregate = AnAggregate' 'Flat
+-- | An aggregate may contain multiple incompatible group-bys which SQL doesn't support.
+-- We partition the sub-expressions by key context.
+--
+-- >  fold [p] projects (p.category := (list(p.name), p.sub_category := sums(p.cost))) :: DSL (Map String ([String], Map String Int))
+--
+-- context of list(p.name): @KeyContext (fromList [k1]) False@
+-- translation: @SELECT p.category, p.name FROM projects@
+--
+-- context of sums(p.cost): @KeyContext (fromList [k1,k2]) True@
+-- translation: @SELECT p.category, p.sub_category, SUM(p.cost) FROM projects GROUP BY p.category,p.sub_category@
+data KeyContext' p = KeyContext { outerKeys :: S.Set (Expr' p), flatGroup :: Bool }
+type KeyContext = KeyContext' 'Flat
+
+deriving instance Eq KeyContext
+deriving instance Ord KeyContext
+deriving instance Show KeyContext
+deriving instance Data KeyContext
+instance Pretty KeyContext where
+    pretty (KeyContext ks isFlat)
+      | S.null ks = mempty
+      | isFlat = "group-by " <> tupled (map pretty $ S.toList ks)
+      | otherwise = "with segments " <> tupled (map pretty $ S.toList ks)
+
+
+instance TraverseP KeyContext' where
+    traverseP f (KeyContext ks b) = KeyContext <$> fmap S.fromList (traverse (traverseP f) $ S.toList ks) <*> pure b
+
+
+-- [Note: Map Operations]
+-- A @DSL (Map k v)@ is represented as a table @DSL [(k,v)]@. We support two main operations:
+--
+-- - toList (it's just a typecast)
+-- - Indexing
+--
+--
+-- Indexing is a bit harder because we need two implementation strategies:
+--
+-- - If the result is a scalar, we can do a lookup. This compiles to a scalar query in SQL
+--
+-- @
+-- {someMap !? k}
+--
+-- (SELECT m.rhs
+-- FROM [someMap] m
+-- WHERE m.lhs = [k])
+-- @
+--
+--
+-- But what if the map holds nested containers? Easy, project them:
+--
+-- @
+-- {fold [p] projects (p.category := (list(p.name), p.sub_category := sums(p.cost))) :: DSL (Map String ([String], Map String Int))}
+--
+--
+-- def cat_nested():
+--    for p in projects:
+--       yield ((p.category,),p.name)
+--
+-- def cat_subcat_flat():
+--    fold [p] projects (p.category, (p.subCategory, (sum(p.name)))):
+--
+-- def proj_cat(k):
+--    for (cat, name) in cat_nested:
+--       if cat == k:
+--         yield name
+--
+-- def proj_cat_subcat_flat1(k):
+--    for (cat, o) in cat_subcat_flat():
+--       if cat == k:
+--         yield o
+--
+-- def proj_cat_subcat_flat2(k,k2):
+--    for (subcatcat, o) in proj_cat_subcat_flat1(k):
+--       if subcat == o:
+--         yield o
+--
+-- {proj ! k}
+-- (Thunk(proj_cat, k), Thunk(proj_cat_subcat_flat(k)))
+-- @
+--
+-- Can we unify these helper functions? Well, maybe:
+--
+-- @
+-- def Project<K extends Eq, V, T extends [(K,V)]>(m: T, k: K) -> [V]:
+--     for (a,b) in force_thunk(m):
+--       if a == k:
+--         yield b
+-- @
+--
+-- But we do need a monomorphised copy for the thunk-forcing coroutine transformation. 
 
 data ALit = IntLit Int | StrLit String
   deriving (Eq, Ord, Show, Data)
@@ -115,19 +280,24 @@ instance TraverseP Expr'  where
    traverseP f (Slice l r tot e) = Slice l r tot <$> traverseP f e
    traverseP f (BOp op a b) = BOp op <$> traverseP f a <*> traverseP f b
    traverseP _ Unit = pure Unit
-   traverseP f (Tuple es) = Tuple <$> traverse (traverseP f) es
+   traverseP f (Tuple ct es) = Tuple ct <$> traverse (traverseP f) es
    traverseP f (AggrNested op a) = AggrNested op <$> f a
    traverseP _ (Aggr _ _) = error "aggr"
    traverseP f (Nest o) = Nest <$> f o
    traverseP f (HasEType r ex t) = HasEType r <$> traverseP f ex <*> pure t
    traverseP f (Lookup sym es) = Lookup sym <$> traverse (traverseP f) es
+   traverseP f (Singular e) = Singular <$> f e
    traverseP _ (Lit i) = pure (Lit i)
 (.==) :: Expr' p -> Expr' p -> Expr' p
 (.==) = BOp Eql
 data AggrOp = SumT | MinT | MaxT
+            | ScalarFD -- ^ Imagine we group by user_id and want to select username
+                       -- The username is uniquely determined by the id, so the
+                       -- standard says we can select it as a scalar. 
+                       -- Some DBs (cough oracle cough) don't implement this correctly
   deriving (Eq, Ord, Show, Data)
 type Expr = Expr' 'Flat
-data ExprType = TupleTyp [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep  | TypeError ExprType ExprType
+data ExprType = TupleTyp ConstrTag [ExprType] | ListTy ExprType ExprType | UnificationVar Int | SourceTy Source | RootTy | LocalTy | EBase TypeRep  | TypeError ExprType ExprType
   deriving (Eq, Ord, Show, Typeable)
 intTy :: ExprType
 intTy = EBase (typeRep (Proxy :: Proxy Int))
@@ -138,7 +308,7 @@ boolTy = EBase (typeRep (Proxy :: Proxy Bool))
 
 instance Data ExprType where
     gfoldl _ z a@EBase {} = z a
-    gfoldl k z (TupleTyp ls)       = z TupleTyp `k` ls
+    gfoldl k z (TupleTyp ct ls)       = z TupleTyp `k` ct `k` ls
     gfoldl k z (ListTy t v) = z ListTy `k` t `k` v
     gfoldl k z (UnificationVar v) = z UnificationVar `k` v
     gfoldl k z (SourceTy v) = z SourceTy `k` v
@@ -154,7 +324,7 @@ instance Data ExprType where
         4 -> k (z SourceTy)
         3 -> k (z UnificationVar)
         2 -> k (k (z ListTy))
-        1 -> k (z TupleTyp)
+        1 -> k (k (z TupleTyp))
         i -> error ("illegal constructor index in expr" <> show i)
 
     toConstr EBase {} = eBaseConstr
@@ -232,6 +402,9 @@ asyncBindConstr = mkConstr langDataType "AsyncBind" [] Prefix
 langDataType :: DataType
 langDataType = mkDataType "Lang" [bindConstr, filterConstr, returnConstr, opLangConstr, lRefConstr, asyncBindConstr]
 
+
+
+
 instance TraverseP Lang' where
     traverseP f (Bind l v l') = Bind <$> f l <*> pure  v <*> f l'
     traverseP f (Filter e l) = Filter <$> traverseP f e <*> f l
@@ -252,7 +425,7 @@ data OpLang' (t::Phase)
   | Union (Lang' t) (Lang' t)
   | Unpack { unpack :: Expr' t, labels :: [Maybe Var], unpackBody :: Lang' t }
   | Let { letVar :: Var, letExpr :: Expr' t, letBody :: Lang' t }
-  | Group { keyLen :: Int, valLen :: Int, groupBy :: [AggrOp], groupBody :: Lang' t }
+  | Fold { foldVar :: Var, context :: KeyContext' t, foldResult :: AnAggregate' t, foldSource :: Lang' t }
   | Call { nestedCall :: Expr' t }
   | Distinct (Lang' t)
   | Force { thunked :: Thunk }
@@ -267,7 +440,7 @@ instance TraverseP OpLang' where
     traverseP f (Union l l') = Union <$> traverseP f l <*> traverseP f l'
     traverseP f (Unpack a b c) = Unpack <$> traverseP f a <*> pure b <*> f c
     traverseP f (Let v e b) = Let v <$> traverseP f e <*> f b
-    traverseP f (Group k k' a c) = Group k k' a <$> f c
+    traverseP f (Fold bound ctx res agg) = Fold bound <$> traverseP f ctx <*> traverseP f res <*> f agg
     traverseP f (HasType r a b) = HasType r <$> f a <*> pure b
     traverseP f (Call b) = Call <$> traverseP f b
     traverseP f (Distinct b) = Distinct <$> f b
@@ -306,8 +479,8 @@ instance Pretty Source where
     pretty (Source s) = pretty s
 instance Pretty ExprType where
     pretty (EBase t) = pretty (show t)
-    pretty (TupleTyp [a]) = "(" <> pretty a <> ",)"
-    pretty (TupleTyp ts) = parens (hsep (punctuate comma (map pretty ts)))
+    pretty (TupleTyp ct [a]) = pretty ct <> "(" <> pretty a <> ",)"
+    pretty (TupleTyp ct ts) = pretty ct <> tupled (map pretty ts)
     pretty (ListTy RootTy l) = brackets (pretty l)
     pretty (ListTy t l) = brackets (pretty l) <> "@" <> pretty t
     pretty (SourceTy o) = pretty o
@@ -323,6 +496,7 @@ instance Pretty AggrOp where
     pretty SumT = "SUM"
     pretty MinT = "MIN"
     pretty MaxT = "MAX"
+    pretty ScalarFD = "UNIQUE"
 instance Pretty Expr where
     pretty (Ref t) = pretty t
     pretty (Proj i _tot e) = pretty e <> "." <> pretty i
@@ -331,16 +505,17 @@ instance Pretty Expr where
     pretty Unit = "()"
     pretty (Aggr op v) = pretty op <> "(" <>  pretty v <> ")"
     pretty (AggrNested op v) = pretty op <> "(" <>  pretty v <> ")"
-    pretty (Tuple [a]) = "(" <> pretty a <> ",)"
-    pretty (Tuple es) = tupled (map pretty es)
+    pretty (Tuple ct [a]) = pretty ct <> "(" <> pretty a <> ",)"
+    pretty (Tuple ct es) = pretty ct <> tupled (map pretty es)
     pretty (AThunk a) = pretty a
     pretty (Nest a) = "Nest" <+> pretty a
     pretty (HasEType Inferred e ty) = parens $ pretty e <+> ":::" <+> pretty ty
     pretty (HasEType _ e ty) = pretty e <+> "::" <+> pretty ty
     pretty (Lookup v e) = pretty v <> pretty e
     pretty (Lit i) = pretty i
+    pretty (Singular e) = parens (pretty e)
 instance Pretty Lang where
-    pretty (Bind a b c) = nest 4 $ group $ "for" <+> pretty b <+> "in" <+> optParens (align (pretty a)) <+> "{" <> (line <> pretty c) </> "}"
+    pretty (Bind a b c) = nest 6 $ group $ "for" <+> pretty b <+> "in" <+> optParens (align (pretty a)) <+> "{" <> (line <> pretty c) </> "}"
       where
         optParens d = group $ flatAlt ("("<> line) space <> align d <> flatAlt (line <> ")") space
     pretty (LRef v) = "*" <> pretty v
@@ -362,17 +537,19 @@ instance Pretty OpLang where
        mkTuple [a] = "(" <> a <> ",)"
        mkTuple as = tupled as
     pretty (Let v e b) = "let" <+> pretty v <+> ":=" <+> pretty e <> flatAlt line " in " <> pretty b
-    pretty (Group l r op body) = group $ "group" <> tupled [pretty l, pretty r] <>  parens (pretty op) <+> pretty body
+    pretty (Fold bound groupBy res body)
+        = group $ hang 2 $
+            group ("fold" </> parens (pretty bound <> " in " <> pretty body) </> pretty groupBy) </> pretty res
     pretty (HasType Inferred e t) = parens $ pretty e <+> ":::" <+> pretty t
     pretty (HasType _ e t) = pretty e <+> "::" <+> pretty t
     pretty (Call e) = "?" <> pretty e
     pretty (Force t) = "!" <> pretty t
     pretty (Distinct t) = "Distinct" <+> pretty t
 instance Pretty a => Pretty (TopLevel' a) where
-    pretty (TopLevel ds root) = "let " <> align (vsep (prettyAssignments ds)) </> "in " </> pretty root
+    pretty (TopLevel ds root) = nest 2 $ "let" </> vsep (prettyAssignments ds) </> "in " </> pretty root
       where
 
-        prettyAssignments m = [pretty k <> prettyVars vars <+> "=" <+>  pretty v | (k, (vars,v)) <- M.toList m]
+        prettyAssignments m = [pretty k <> prettyVars vars <+> group (nest 4 ("=" </>  pretty v)) | (k, (vars,v)) <- M.toList m]
         prettyVars [] = mempty
         prettyVars vs = list (map pretty vs)
 

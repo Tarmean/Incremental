@@ -1,4 +1,3 @@
-{-# LANGUAGE FunctionalDependencies #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# LANGUAGE LambdaCase #-}
 module DemandAnalysisTransform where
@@ -15,7 +14,7 @@ import OpenRec
 data VarTree = VarTree Var [VarTree] | BindAs Var | UnUsed deriving (Eq, Ord, Show)
 
 varTreeToExpr :: VarTree -> Expr
-varTreeToExpr (VarTree _ ls) = Tuple (map varTreeToExpr ls)
+varTreeToExpr (VarTree _ ls) = tuple (map varTreeToExpr ls)
 varTreeToExpr (BindAs v) = Ref v
 varTreeToExpr UnUsed = Unit
 

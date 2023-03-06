@@ -2,15 +2,18 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes, ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Use <$>" #-}
 -- | Typecheck and elaborate a program.
 module Elaborator where
 
 
-
+import Debug.Trace
 import CompileQuery
 import Control.Monad.Except
 import Control.Monad.Reader
 import qualified Data.Map.Lazy as M
+import qualified Data.Set as S
 import GHC.Stack (HasCallStack, prettyCallStack, callStack)
 import qualified Data.Typeable as Ty
 import Data.Kind (Type)
@@ -57,7 +60,7 @@ addListTy (s, (_:_,_)) (ListTy _ t) = ListTy (SourceTy s) t
 addListTy _ _ = error "not a list ty"
 
 fillUVars :: ExprType -> M ExprType
-fillUVars (TupleTyp t) = TupleTyp <$> traverse fillUVars t
+fillUVars (TupleTyp tag t) = TupleTyp tag <$> traverse fillUVars t
 fillUVars (ListTy k t) = ListTy <$> fillUVars k <*> fillUVars t
 fillUVars (UnificationVar v) = do
     env <- gets uEnv
@@ -138,16 +141,16 @@ tcExprW (AThunk thunk) = do
 tcExprW (Proj i tot e) = do
    e <- tcExpr e
    case nTy e of
-      TupleTyp tys -> pure $ setEType (Proj i tot e) (tys !! i)
+      TupleTyp _tag tys -> pure $ setEType (Proj i tot e) (tys !! i)
       uv@UnificationVar {} -> do
          v <- replicateM tot freshUVar
-         _ <- unify uv (TupleTyp v)
+         _ <- unify uv (tupleTyp v)
          pure $ setEType (Proj i tot e) (v !! i)
       _ -> throwError ("tcExpr: Proj on non-record" <> show e)
-tcExprW Unit = pure $ setEType Unit (TupleTyp [])
-tcExprW (Tuple es) = do
+tcExprW Unit = pure $ setEType Unit (tupleTyp [])
+tcExprW (Tuple tag es) = do
    es' <- traverse tcExpr es
-   pure $ setEType (Tuple es') (TupleTyp (map nTy es'))
+   pure $ setEType (Tuple tag es') (TupleTyp tag (map nTy es'))
 tcExprW (BOp op a b) = do
   a' <- tcExpr a
   b' <- tcExpr b
@@ -165,18 +168,22 @@ tcExprW (Nest n) = do
   sourceTy <- tcLang n
   uv <- freshUVar
   pure $ setEType (Nest n) (ListTy uv (lTy sourceTy))
+tcExprW (Singular l) = do
+   l <- tcLang l
+   (sourceTy, retTy) <- unList (lTy l)
+   pure $ setEType (Singular l) retTy
 tcExprW (Lookup source args) = do
    sourceTy <- lookupVar (unSource source)
    args <- traverse tcExpr args
    keyTy <- freshUVar
    valTy <- freshUVar
    origin <- freshUVar
-   _ <- unify sourceTy (ListTy origin (TupleTyp [keyTy, valTy]))
+   _ <- unify sourceTy (ListTy origin (tupleTyp [keyTy, valTy]))
    pure $ hasEType (Lookup source args) valTy
 tcExprW (Slice l r total tuple) = do
    tuple <- tcExpr tuple
    case nTy tuple of
-      TupleTyp ls -> pure $ hasEType (Slice l r total tuple) (TupleTyp (slice l r (flattenType ls)))
+      TupleTyp tag ls -> pure $ hasEType (Slice l r total tuple) (TupleTyp tag (slice l r (flattenType ls)))
       _ -> error "Illegal Slice"
 
 slice :: Int -> Int -> [a] -> [a]
@@ -235,11 +242,15 @@ tcOpLang (Union a b) = do
    pure $ HasType Inferred (OpLang $ Union a' b') oTy
 tcOpLang (Unpack l vs body) = do
   l' <- tcExpr l
-  case nTy l' of
-    TupleTyp tys -> do
-      body' <- local (M.union (M.fromList [ (a,b) | (Just a, b) <- zipStrict vs tys])) (tcLang body)
-      pure $ HasType Inferred (OpLang $ Unpack l' vs body') (lTy body')
-    _ -> throwError ("tcOpLang: Unpack on non-record: " <> prettyS l')
+  tys <- case nTy l' of
+    TupleTyp _ tys -> pure tys
+    _ -> do
+        tys <- replicateM (length vs) freshUVar
+        _ <- unify (nTy l') (tupleTyp tys)
+        pure tys
+  body' <- local (M.union (M.fromList [ (a,b) | (Just a, b) <- zipStrict vs tys])) (tcLang body)
+  pure $ HasType Inferred (OpLang $ Unpack l' vs body') (lTy body')
+
 tcOpLang (Distinct e) = do
     e' <- tcLang e
     pure $ HasType Inferred (OpLang $ Distinct e') (lTy e')
@@ -255,12 +266,22 @@ tcOpLang w@(Force (Thunk sym _args)) = do
     symTy  <- lookupVar (unSource sym)
     ty' <- cleanSource symTy
     pure $ HasType Inferred (OpLang w) ty'
-tcOpLang (Group keyLen valLen ops body) = do
-  -- uvars <- replicateM (keyLen+valLen) freshUVar
-  body <- tcLang body
-  uv <- freshUVar
-  tv <- freshUVar
-  pure (HasType Inferred (OpLang (Group keyLen valLen ops body)) (ListTy uv tv))
+tcOpLang (Fold bound ctx res src) = do
+    src <- tcLang src
+    (_,srcElem) <- unList (lTy src)
+    (res,resTy) <- local (M.insert bound srcElem) (tcAggregate res)
+
+    let outerGroup = S.toList (outerKeys ctx)
+    outerGroup <- local (M.insert bound srcElem) (traverse tcExpr outerGroup)
+    ctx <- pure (ctx { outerKeys = S.fromList outerGroup })
+    resLocality <- freshUVar
+    let groupTys = map nTy outerGroup
+        resTy' :: ExprType
+        resTy' 
+          | flatGroup ctx && null groupTys = resTy
+          | otherwise = ListTy resLocality resTy
+
+    pure (HasType Inferred (OpLang (Fold bound ctx res src)) resTy')
   -- sourceTy <- freshUVar
   -- unify (lTy body) (ListTy sourceTy (TupleTyp uvars)) >>= \case
   --   ListTy sourceTy (TupleTyp uvars) -> do
@@ -276,7 +297,31 @@ tcOpLang (Group keyLen valLen ops body) = do
   --   mapTyVal :: ExprType -> M ExprType
   --   mapTyVal (ListTy k (TupleTyp (_:b))) = pure $ ListTy k (TupleTyp b)
   --   mapTyVal ty = error ("mapTyVal: not a key-value pair: " <> show ty)
+tcAggregate :: AnAggregate -> M (AnAggregate, ExprType)
+tcAggregate (BaseAg ag ex) = do
+  ex <- tcExpr ex
+  ot <- checkFoldOp ag (nTy ex)
+  pure (BaseAg ag ex, ot)   
+tcAggregate (MapOf k v) = do
+    k <- tcExpr k
+    (v, vTy) <- tcAggregate v
+    pure (MapOf k v, ListTy LocalTy (tupleTyp [nTy k, vTy]))
+tcAggregate (AggrTuple ls) = do
+   ps <- traverse tcAggregate ls
+   let (as, ts) = unzip ps
+   pure (AggrTuple as, tupleTyp ts)
+tcAggregate (ListOf _) = error "Not implemented"
+tcAggregate (SetOf _) = error "Not implemented"
 
+
+unList :: ExprType -> M (ExprType, ExprType)
+unList (ListTy l r) = pure (l,r)
+unList ty = do
+   r <- freshUVar
+   locality <- freshUVar
+   unify ty (ListTy locality r) >>= \case
+     ListTy l r -> pure (l,r)
+     _ -> pure (locality,r)
 
 cleanSource :: ExprType -> M ExprType
 cleanSource (ListTy _ a) = do
@@ -313,6 +358,15 @@ checkOp op ty = do
   where
     inpTy _ = EBase (typeRep @Int)
     outTy _ = EBase (typeRep @Int)
+checkFoldOp :: AggrOp -> ExprType -> M ExprType
+checkFoldOp ScalarFD ty = pure ty
+checkFoldOp op ty = do
+  st <- freshUVar
+  _ <- unify (inpTy op) ty 
+  pure (outTy op)
+  where
+    inpTy _ = EBase (typeRep @Int)
+    outTy _ = EBase (typeRep @Int)
 
 zipStrict :: [a] -> [b] -> [(a, b)]
 zipStrict [] [] = []
@@ -331,11 +385,11 @@ unify = go
         Just l -> go l r
     go l (UnificationVar v) = go (UnificationVar v) l
     go (ListTy k l) (ListTy k' r) = ListTy <$> go k k' <*> go l r
-    go (TupleTyp l) (TupleTyp r) 
-      | length l == length r = TupleTyp <$> (zipStrict l r & traverse (uncurry go))
+    go (TupleTyp tagL l) (TupleTyp tagR r) 
+      | tagL == tagR = TupleTyp tagL <$> (zipStrict l r & traverse (uncurry go))
     go l r 
       | l == r = pure l
-      -- | otherwise = pure l
+      | otherwise = pure l
       | otherwise = do
         ctx <- gets lastContext
         throwError ("unify: " <> show l <> " /= " <> show r <> prettyCallStack callStack <> "\nctx: " <> prettyS (l,r, ctx))
@@ -367,4 +421,4 @@ assert False msg = throwError msg
 lookupVar :: HasCallStack => Var -> M ExprType
 lookupVar v = asks (M.lookup v) >>= \case
   Just ty -> pure ty
-  Nothing -> throwError $ "Variable not in scope: " ++ show v
+  Nothing -> throwError $ "Variable not in scope: " ++ show v <> prettyCallStack callStack

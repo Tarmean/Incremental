@@ -30,7 +30,6 @@ import GHC.Stack (HasCallStack)
 import Control.Monad.Reader.Class
 import Control.Lens (traverseOf, each, _1)
 import Data.Maybe (fromMaybe)
-import Debug.Trace (traceM)
 
 
 
@@ -130,7 +129,7 @@ hoistFilter (Bind (Filter g e) v e') = Just (Filter g (Bind e v e'))
 hoistFilter _ = Nothing
 
 projTuple :: Expr -> Maybe Expr
-projTuple (Proj i _ (Tuple ls)) = Just (ls !! i)
+projTuple (Proj i _ (Tuple _ ls)) = Just (ls !! i)
 projTuple _ = Nothing
 
 distinctUnit :: Lang -> Maybe Lang
@@ -143,7 +142,7 @@ filterFilter (Filter p (Filter q s)) = Just (Filter (BOp And p q) s)
 filterFilter _ = Nothing
 
 trivialRepack :: Expr -> Maybe Expr
-trivialRepack (Tuple (Proj 0 i e:ls))
+trivialRepack (Tuple _ (Proj 0 i e:ls))
   | length ls == (i-1) && all isRepack (zip [1..] ls) = Just e
   where
     isRepack (j,Proj k i' e')
@@ -287,6 +286,15 @@ compactVarsT
                   var' <- refreshVar var
                   body' <- rec body
                   pure (Let var' expr' body')
+         Fold var ctx out src -> Just $ do
+             src <- rec src
+             locally do
+                var <- refreshVar var
+                ctx <- rec ctx
+                out <- rec out
+                pure (Fold var ctx out src)
+
+
          _ -> Nothing)
   lookupRenamedVar
      = tryTransM_ @Lang \case
@@ -310,6 +318,8 @@ locally m = do
   a <- m
   put old
   pure a
+
+
 
 inlineLets :: Data a => a -> a
 inlineLets = flip evalState mempty . runT (
@@ -346,10 +356,10 @@ dropTopLevel a = a { defs = M.map dropDefs (defs a) }
 
 -- inlineReturns :: 
 
-lookupToLoop_ :: (Data a) => a -> a
-lookupToLoop_ a = runIdentity  . withVarGenT (maxVar a). lookupToLoop $ a
-lookupToLoop :: (Applicative m, Data a, MonadVar m) => a -> m a
-lookupToLoop a = do
+lookupToLoop :: (Data a) => a -> a
+lookupToLoop a = runIdentity  . withVarGenT (maxVar a). lookupToLoop_ $ a
+lookupToLoop_ :: (Applicative m, Data a, MonadVar m) => a -> m a
+lookupToLoop_ a = do
    (out, r) <- runWriterT (runT (tryTransM_ lowerLookup &&& (tryTransM insertBinds ||| recurse)) a)
    case r of
      [] -> pure out
@@ -361,10 +371,16 @@ insertBinds rec m = Just $ do
 mkFloatedBinds :: Lang -> (Source, Var, [Expr]) -> Lang
 mkFloatedBinds r (Source k, v, e) = Bind (LRef k) v (filters e r)
   where
-   filters ls = Filter (BOp Eql (Tuple ls) (Proj 0 2 (Ref v)))
+   filters ls = Filter (BOp Eql (tuple ls) (Proj 0 2 (Ref v)))
 lowerLookup :: (MonadWriter [(Source, Var, [Expr])] m, MonadVar m) => Expr -> Maybe (m Expr)
 lowerLookup (Lookup k expr) = Just $ do
   l <- genVar "l"
   tell [(k, l, expr)]
   pure (Proj 1 2 (Ref l))
 lowerLookup _ = Nothing
+
+-- lowerLookupToSingular :: MonadVar m => Expr -> Maybe (m Expr)
+-- lowerLookupToSingular (Lookup s args) = Just $ do
+--   v <- genVar "l"
+--   pure (Proj 0 1 (Singular $ Bind (LRef (unSource s)) v (Filter (BOp Eql (Proj 0 2 (Ref v)) (tuple args)) (Return (tuple [Proj 1 2 (Ref v)])))))
+-- lowerLookupToSingular _ = Nothing

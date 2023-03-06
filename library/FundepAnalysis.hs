@@ -3,6 +3,7 @@
 {-# LANGUAGE BlockArguments, LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
+-- TODO: Add reasoning about equality
 -- | Hunt down SQL fundeps
 --
 -- Problem:
@@ -47,12 +48,27 @@ import OpenRec
 import Control.Monad.Writer (execWriterT, tell)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
-import CompileQuery (TableMeta(..), FunDeps(..), Var (Var))
+import CompileQuery (TableMeta(..), FunDeps(..), Var (Var), prettyS)
 import Control.Monad.State.Strict
 import SQL
 import Control.Monad.Reader
 import Prettyprinter
+import qualified CompileQuery as Q
+import RenderHypergraph (toFgl, renderGraph)
+import GHC.IO (unsafePerformIO)
+import GHC.Stack (HasCallStack)
+import Data.Monoid (Ap(..))
 
+-- [Note: The Fundep graph]
+-- We turn queries into a graph of fundep implications. We have three kinds of nodes:
+--
+-- - Root: If we do an analysis in a lateral sub-query, everything outside is unchanging and frozen in time from our perspective and determined by this root
+-- - `nid :. s` a field of another node. When a table returns a tuple, each tuple field is a node
+-- - `ARef Var` refers to a named variable, such as a from source.
+
+-- [Note: Determining SPJ nodes]
+-- We have two kind
+-- self <-> [self :. k | k <- M.keys spj.proj]
 
 infixr 5 :.
 data NId = Root | NId :. String | ARef Var
@@ -62,18 +78,24 @@ instance Pretty NId where
         Root -> "Root"
         a :. b -> pretty a <> "." <> pretty b
         ARef a -> pretty a
-pattern (:-) :: Ord n => n -> [n] -> AClause n
-pattern (:-) a b  <- (makeFrom -> (a,b))
+pattern (:-) :: Ord n => n -> [n] -> String -> AClause n
+pattern (:-) a b lab <- (makeFrom -> (a,b,lab))
   where
-    (:-) nId nids = AClause nId (S.fromList nids)
-makeFrom :: AClause n -> (n, [n])
-makeFrom (AClause a b) = (a, S.toList b)
+    (:-) nId nids lab = AClause nId (S.fromList nids) lab
+makeFrom :: AClause n -> (n, [n], String)
+makeFrom (AClause a b lab) = (a, S.toList b, lab)
 
 
 newtype Env = Env {
    constraints :: [AClause NId]
  }
 
+{-# NOINLINE traceGraph #-}
+traceGraph :: [AClause NId] -> a -> a
+traceGraph g out = unsafePerformIO (do
+   dropDot g) `seq` out
+dropDot :: [AClause NId] -> IO ()
+dropDot dots = renderGraph (toFgl [ (l,S.toList rs, lbl) | AClause l rs lbl <- dots ]) "dump.svg"
 
 -- [Note: isLocalSource]
 --
@@ -101,7 +123,17 @@ withLocals l = local (M.union (M.fromList l))
 
 toGraph :: SQL -> FEnv NId
 toGraph sql = fromClauses clauses
-  where Env clauses = execState (runReaderT (makeGraph Root sql) mempty) (Env mempty) 
+  where
+    Env clauses = execState (runReaderT (makeGraph Root sql) mempty) (Env mempty)
+    !_ = traceGraph clauses ()
+
+data GlobalCtx = GlobalCtx {
+    ctxVars :: M.Map Var NId
+  , ctxGraphs :: FEnv NId
+  }
+toGraphWithCtx :: GlobalCtx -> SQL -> FEnv NId
+toGraphWithCtx ctx sql = ctxGraphs ctx <> fromClauses clauses
+  where Env clauses = execState (runReaderT (makeGraph Root sql) (ctxVars ctx)) (Env mempty)
 
 userTable, jobTable :: SQL
 userTable = Table (TableMeta (FD [["user_id"]]) ["user_id", "name"]) "users"
@@ -110,7 +142,7 @@ jobTable = Table (TableMeta (FD [["job_id"]]) ["user_id", "job_id", "cost"]) "jo
 aTest :: SQL
 aTest = ASPJ (SPJ {
   sources = [(Var 2 "U", userTable), (Var 3 "PQ", aggrTable)],
-  wheres = [Eql (Ref (Var 2 "U") "user_id") (Ref (Var 3 "PQ") "user_id")],
+  wheres = [BOp Q.Eql (Ref (Var 2 "U") "user_id") (Ref (Var 3 "PQ") "user_id")],
   proj = M.fromList [("user_id", Ref (Var 2"U") "user_id"), ("name", Ref (Var 2 "U") "name"), ("agg", Ref (Var 3 "PQ") "agg")]
         })
   -- sources = [(Var 2 "U", userTable), (Var 3 "PQ", aggrTable), (Var 4 "PQ2", aggrTable2)],
@@ -122,7 +154,7 @@ aTest = ASPJ (SPJ {
       ASPJ SPJ {
         sources = [(Var 1 "J", jobTable)],
         wheres = [],
-        proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp SumO (Ref (Var 1 "J") "cost"))]
+        proj = M.fromList [("user_id", Ref (Var 1 "J") "user_id"), ("agg", AggrOp Q.SumT (Ref (Var 1 "J") "cost"))]
       }
      -- aggrTable2 =
      --  GroupQ [Ref (Var 1 "J") "user_id"] $
@@ -139,7 +171,10 @@ makeGraph self (OrderBy _ spj) = makeGraph self spj
 makeGraph self (ASPJ spj) = do
     let isLocalSource k = any ((==k) . fst) spj.sources
     withLocals [(v, mkRef self v) | (v,_) <- spj.sources ] $ do
-        self <-> [self :. k | k <- M.keys spj.proj]
+        -- See [Note: Determining SPJ nodes]
+        --
+        -- forM_ (M.keys spj.proj)$ \x -> (self :. x) .- [self]
+        (self <-> [ARef k | (k,_) <- spj.sources]) "FROM"
         forM_ (M.toList spj.proj) $ \(k,v) -> do
             mkExpr (self :. k) v
         forM_ spj.sources $ \(k,v) -> do
@@ -147,50 +182,80 @@ makeGraph self (ASPJ spj) = do
         forM_ spj.wheres $ \v -> do
             case v of
               -- See Note isLocalSource
-              Eql (Ref l x) (Ref r y)
+              BOp Q.Eql (Ref l x) (Ref r y)
                 | isLocalSource l || isLocalSource r -> do
                   l <- resolveLocal l
                   r <- resolveLocal r
-                  (l :. x) <-> [r :. y]
+                  ((l :. x) <-> [r :. y]) "WHERE{=}"
               _ -> pure ()
+makeGraph self (DistinctQ e) = do
+    makeGraph self e
+    (self <-> [self :. k | k <- M.keys (selectOf e)]) "DISTINCT"
 makeGraph self (Slice _ _ e) = makeGraph self e
-makeGraph self (Table (TableMeta (FD fds) fields) _) = do
-    self <-> [self :. field | field <- fields]
-    forM_ fds $ \fd -> self .- [self :. f | f <- fd ]
+makeGraph self table@(Table (TableMeta (FD fds) fields) _) = do
+    when (null fields) (error $ "Table with no fields" <> show table)
+    -- self <-> [self :. field | field <- fields]
+    forM_ fields $ \field -> ((self :. field) .- [self]) "Table{field}"
+    forM_ fds $ \fd -> (self .- [self :. f | f <- fd]) "Table{FD}"
+-- FIXME: this isn't quite accurate. The identity of a group-by tuple does not determine the identity of the grouped tuple
+-- In fact it doesn't even work the other way around, with cube or rollup queries we can end up with more tuples than we started with
 makeGraph self (GroupQ groups source) = do
    -- just use the same node for the group-by and the nested select
    -- the scoping is a bit weird, though
-   groupDeps <- traverse depsFor groups
-   case sequence groupDeps of
-       Nothing -> pure ()
-       Just o -> self <-> concat o
-   makeGraph self source
+   -- groupDeps <- traverse depsFor groups
+   os <- forM groups $ \case
+      Ref k v -> Just [ARef k :. v] <$ ((ARef k :. v) .- [self]) "groupBy{result->key}"
+      o -> collectDeps o
+   case sequence os of
+     Just os -> (self .- concat os) "groupBy{key->result}"
+     Nothing -> pure ()
+   -- See [Note: Passing self for GroupQ]
+   -- makeGraph self source
+   makeGraph (self :. "$inner") source
+   forM_ (M.keys $ selectOf source) $ \fld -> do
+      (((self :. "$inner") :. fld) <-> [self :. fld]) "GroupBy{inner loop}"
 
-depsFor :: forall m. MonadReader (M.Map Var NId) m => Expr -> m (Maybe [NId])
-depsFor e = execWriterT $ runT (
+-- [Note: Passing self for GroupQ]
+-- Grouping gives us two nodes: The outer aggregate result, and the inner aggregated tuple.
+-- Clearly, the result does not tell us precisely which inner tuple it came from. It probably came from many!
+--
+-- But: The inner tuple must know the grouping key, and from the grouping key we could compute the aggregate.
+-- So at least that direction must be derivable. But how do we get the connection between the tuple fields?
+--
+-- For now, we encode the inner tuple as `self :. "$inner"`, and the outer tuple as `self`.
+-- Aggregate fields are never the target of a fundep so a tuple does NOT determine its own aggregate results.
+
+collectDeps :: forall m. MonadReader (M.Map Var NId) m => Expr -> m (Maybe [NId])
+collectDeps e = fmap getAp . execWriterT $ runT (
+      tryTransM_ (\case
+        AggrOp op e
+          | op /= Q.ScalarFD -> Just (e <$ tell (Ap Nothing))
+        _ -> Nothing
+      ) |||
       tryTransM_ \case
         e@(Ref k v) -> Just do
-           -- o <- resolveLocal k
-           -- tell $ Just [o :. v]
-           tell $ Just [ARef k :. v]
+           tell $ Ap $ Just [ARef k :. v]
            pure e
         _ -> Nothing
   ||| recurse
         ) e
 
 mkExpr :: NId -> Expr -> M ()
-mkExpr nid (Ref v a) = do
-   rv <- resolveLocal v
-   nid <-> [rv :. a]
-mkExpr _ _ = pure ()
+mkExpr nid e = collectDeps e >>= \case
+   Just deps -> (nid .- deps) ("SELECT{"<>prettyS e<>"}")
+   Nothing -> pure ()
 
 resolveLocal :: MonadReader (M.Map Var NId) m => Var -> m NId
 resolveLocal s = asks (M.findWithDefault (ARef s) s)
 
-(<->) :: NId -> [NId] -> M ()
-(<->) l rs = do
-   l .- rs
-   forM_ rs $ \r -> r .- [l]
-(.-) :: NId -> [NId] -> M ()
-(.-) k v = do
-  modify $ \s -> s { constraints = (k :- v) :constraints s }
+(<->) :: HasCallStack => NId -> [NId] -> String -> M ()
+(<->) l rs lab
+  | null rs = error ("illegal <->" <> show l)
+  | otherwise = do
+   (l .- rs) (lab <> " (->)")
+   forM_ rs $ \r -> (r .- [l]) (lab <> " (<-)")
+(.-) :: HasCallStack => NId -> [NId] -> String -> M ()
+(.-) k v lab
+  | null v = error ("illegal .-" <> show k)
+  | otherwise = do
+      modify $ \s -> s { constraints = (k :- v) lab :constraints s }

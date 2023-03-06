@@ -35,7 +35,7 @@ import CompileQuery ((</>))
 import Data.Either (partitionEithers)
 import Data.Bifunctor (second)
 
-data AClause n = AClause !n !(S.Set n)
+data AClause n = AClause !n !(S.Set n) String
   deriving (Eq, Ord, Show)
 
 data FEnv n = FEnv {
@@ -44,6 +44,15 @@ data FEnv n = FEnv {
    unitProps :: M.Map n (S.Set n),
    pending :: !(S.Set n)
  } deriving (Eq, Ord, Show, Generic)
+
+instance Ord n => Semigroup (FEnv n) where
+   l <> r = FEnv {
+      active = active l <> active r,
+      watchList = watchList l <!> watchList r,
+      unitProps = unitProps l <!> unitProps r,
+      pending = pending l <> pending r
+    }
+    where (<!>) = M.unionWith (error "Collision in FEnv semigroup")
 
 isActive :: Ord n => n -> FEnv n -> Bool
 isActive v env = S.member v (active env)
@@ -82,13 +91,13 @@ fromClauses c = execState (mapM_ makeWatch otherClauses) FEnv {active = mempty, 
   where
     unitprops = M.fromListWith (<>) $ map (second S.singleton) unitClauses
     (unitClauses, otherClauses) = partitionEithers $ map isUnit c
-    isUnit cls@(AClause t s)
+    isUnit cls@(AClause t s _)
       | S.size s == 1
       , [x] <- S.toList s = Left (x, t)
       | otherwise = Right cls
 
 makeWatch :: (Ord n, MonadState (FEnv n) m) => AClause n -> m ()
-makeWatch c@(AClause vid clause) = do
+makeWatch c@(AClause vid clause _) = do
   seen <- use #active
   unless (S.member vid seen) do
      case S.toList (clause S.\\ seen) of
@@ -117,4 +126,4 @@ instance Pretty n => Pretty (FEnv n) where
        "units" <+> "=" <+> list [pretty k <+> "->" <> tupled (pretty <$> S.toList v) | (k,v) <- M.toList units] <> "," </> 
        "pending" <+> "=" <+> pretty (S.toList pending) </> "}")
 instance Pretty n => Pretty (AClause n) where
-   pretty (AClause n s) = tupled [pretty a | a <- S.toList s] <+> "->" <+> pretty n
+   pretty (AClause n s _) = tupled [pretty a | a <- S.toList s] <+> "->" <+> pretty n

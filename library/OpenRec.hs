@@ -19,6 +19,7 @@ import Data.Functor.Identity (runIdentity, Identity)
 import GHC.Base (oneShot)
 import Util (prettyS)
 import Prettyprinter (Pretty)
+import Data.Monoid (Endo(..))
 
 
 -- | Data gives us a way to get the type of a value, and to traverse its children
@@ -67,6 +68,10 @@ runT trans a0 = f a0
       Hit _ -> go x
     go :: forall x. Data x => x -> m x
     go = withCtx trans (Ctx pure pure f)
+
+collectAll :: forall b a. (Data a, Typeable b) => a -> [b]
+collectAll = flip appEndo [] . runQ
+   (tryQuery_ (\x -> Just $ Endo (x:)) ||| recurse)
 
 failed :: Trans m
 failed = T mempty NoRec (\Ctx{..} a -> onFailure a)
@@ -176,7 +181,7 @@ tryQuery f = T (onlyRel @a) NoRec $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
       Nothing -> onFailure a'
       Just o -> tell o >> onSuccess a'
   Nothing -> onFailure a'
-tryQuery_ :: forall a o m. (Monad m, Monoid o, Data a) => (a -> Maybe o) -> Trans (WriterT o m)
+tryQuery_ :: forall a o m. (Monad m, Monoid o, Typeable a) => (a -> Maybe o) -> Trans (WriterT o m)
 tryQuery_ f = T (onlyRel @a) NoRec $ \Ctx {..} (a' :: a') -> case eqT @a @a' of
   Just Refl -> case f a' of
       Nothing -> onFailure a'

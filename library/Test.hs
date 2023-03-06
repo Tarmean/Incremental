@@ -12,7 +12,7 @@ import qualified TypedDSL as T
 import CompileQuery
 
 table :: String -> [ExprType] -> T.DSL [a]
-table s tys = T.ALang $ OpLang (HasType Given (OpLang (Opaque s (TableMeta (FD []) []))) (ListTy RootTy $ TupleTyp tys))
+table s tys = T.ALang $ OpLang (HasType Given (OpLang (Opaque s (TableMeta (FD []) ["f" <> show i | i <- [0..length tys]]))) (ListTy RootTy $ tupleTyp tys))
 
 userTable :: T.DSL [(Int, String)]
 userTable = table "user" [intTy, stringTy]
@@ -62,7 +62,7 @@ testAgg = T.do
     userGroupsTable :: T.DSL [(Int, Int)]
     userGroupsTable = table "userGroups" [intTy, intTy]
     groupsTable :: T.DSL [(String, Int)]
-    groupsTable = table "userGroups" [stringTy, intTy]
+    groupsTable = table "groups" [stringTy, intTy]
 
 -- -- testFlat :: RecLang
 -- -- testFlat = M.do

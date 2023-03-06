@@ -174,26 +174,31 @@ inlineLang toInline m = runIdentity .: runT $
   ||| recurse
 
 
-doInlines :: MonoidMap Var Usage -> TopLevel -> TopLevel
-doInlines arities tl = tl {
+doInlines :: InlineConfig -> MonoidMap Var Usage -> TopLevel -> TopLevel
+doInlines cfg arities tl = tl {
     defs = M.filterWithKey (\k _ -> unSource k `S.notMember` inlines) defs'
  }
   where
     defs' = M.map (second (inlineLang inlines (M.mapKeysMonotonic unSource $ M.map snd defs'))) (defs tl)
-    inlines = gatherInlines tl arities defs'
-gatherInlines :: TopLevel -> MonoidMap Var Usage -> M.Map Source ([Var], Lang) -> S.Set Var
-gatherInlines tl arities theDefs = S.union simples inlines
+    inlines = gatherInlines cfg tl arities defs'
+gatherInlines :: InlineConfig -> TopLevel -> MonoidMap Var Usage -> M.Map Source ([Var], Lang) -> S.Set Var
+gatherInlines cfg tl arities theDefs = S.union simples inlines
   where
     toInline = withArity Once arities
     avoids = avoidInline (defs tl)
-    inlines = S.fromList [ v | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v], inlinable def]
+    inlines = S.fromList [ v | v <- toInline, S.notMember v avoids, Just (_args, def) <- [theDefs M.!? Source v], canInline cfg def]
     simples = S.fromList $ map unSource $ M.keys $ simpleBinds (M.map snd $  defs tl)
 
-inlinable :: Lang -> Bool
--- inlinable (Comprehend {}) = True
--- inlinable (Return {}) = True
-inlinable (OpLang Group{}) = False
-inlinable _ = True
+
+newtype InlineConfig = InlineConfig {
+  canInline :: Lang -> Bool
+  }
+inlineBase :: InlineConfig
+inlineBase = InlineConfig (\case
+  OpLang (Fold {}) -> False
+  _ -> True)
+inlineGreedy :: InlineConfig
+inlineGreedy = InlineConfig (const True)
 
 -- | Count how many results are produced by a query
 outMultiplicity :: M.Map Source Usage -> Lang -> Usage
@@ -207,15 +212,15 @@ outMultiplicity env (OpLang l) = case l of
   Union a b -> outMultiplicity env a <> outMultiplicity env b
   Unpack _ _ b -> outMultiplicity env b
   Let _ _ b -> outMultiplicity env b
-  Group {} -> Once
+  Fold {} -> Once
   Call _ -> Once
   Force (Thunk t _) -> M.findWithDefault Many t env
   HasType _ t _ -> outMultiplicity env t
   Distinct t -> outMultiplicity env t
 
 
-optPass :: TopLevel -> TopLevel
-optPass tl = dropUseless multiplicities $ doInlines multiplicities $ dropUseless multiplicities tl
+optPass :: InlineConfig -> TopLevel -> TopLevel
+optPass cfg tl = dropUseless multiplicities $ doInlines cfg multiplicities $ dropUseless multiplicities tl
   where
     multiplicities = analyzeArity tl
 
