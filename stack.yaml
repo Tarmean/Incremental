@@ -44,6 +44,8 @@ extra-deps:
     commit: 4d5239c1fb8181e8d92e3a6312ceb2eee3ef619a
     subdirs: 
       - datafix
+  - git: https://github.com/alt-romes/hegg/
+    commit: 52c0143b217059f5686e45a2a4da03a8546bf205
 
   - pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948
 allow-newer: true
