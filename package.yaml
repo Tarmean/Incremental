@@ -36,6 +36,10 @@ library:
   - generic-lens
   - transformers
   - datafix
+  - hegg
+  - bytestring
+  - fgl
+  - graphviz
   source-dirs: library
 
 executables:
