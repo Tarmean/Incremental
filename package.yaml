@@ -41,7 +41,9 @@ library:
   - fgl
   - graphviz
   - deriving-compat
+  - text
   source-dirs: library
+
 
 executables:
   Incremental:

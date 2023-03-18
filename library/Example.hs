@@ -14,6 +14,7 @@ import TypedDSL (coerceLang, DSL)
 import DemandAnalysisTransform (dropDeadArgs)
 import ValueNaming (doHoistLevels)
 import LangToSQL (langToSQL)
+import CongruenceClosure (dumpGraph)
 import SQL (SQL,doFlattens)
 import MergeSQLJoins (mergeGroupBys)
 mergeGroupingOps :: a -> a
@@ -33,4 +34,6 @@ main :: IO ()
 main = do
    let rt = runTest testAgg
    pprint rt
+   let ((_,sql):_) = showTL rt
+   dumpGraph "demo.svg" sql
    pprint $ showTL rt

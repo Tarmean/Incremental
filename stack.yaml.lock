@@ -43,16 +43,16 @@ packages:
     git: https://github.com/sgraf812/datafix/
     subdir: datafix
 - completed:
-    commit: 52c0143b217059f5686e45a2a4da03a8546bf205
-    git: https://github.com/alt-romes/hegg/
+    commit: bd8ac2b0b920c007ce25bac1b7c4137c9e5aadae
+    git: https://github.com/Tarmean/hegg/
     name: hegg
     pantry-tree:
-      sha256: 587b6208498f8fab96103ae337c9618d1e58fb81d375917902834593124a8076
+      sha256: 7a13c646d6f6b2cd4eb2f5ce6ac3bf86093e0309ce1a026e5462860bb5f82a24
       size: 2537
     version: 0.3.0.0
   original:
-    commit: 52c0143b217059f5686e45a2a4da03a8546bf205
-    git: https://github.com/alt-romes/hegg/
+    commit: bd8ac2b0b920c007ce25bac1b7c4137c9e5aadae
+    git: https://github.com/Tarmean/hegg/
 - completed:
     hackage: pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948
     pantry-tree:

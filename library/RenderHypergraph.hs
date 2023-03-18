@@ -15,6 +15,12 @@ import Util ( prettyS )
 import Prettyprinter (Pretty)
 import Data.Bifunctor (first)
 
+-- | Render .gv format into svg
+renderGv :: (PrintDotRepr gr n, Ord n) => FilePath -> gr n -> IO ()
+renderGv fp gv = void (runGraphviz gv Svg fp)
+
+
+
 -- | Render a graph
 renderGraph :: (Pretty lab, Pretty n) => Gr (Either lab n) (Maybe lab) -> FilePath -> IO ()
 renderGraph g fp = void (runGraphviz (graphToDot params g) Svg fp)

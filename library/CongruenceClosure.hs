@@ -1,8 +1,12 @@
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Eta reduce" #-}
+{-# HLINT ignore "Use newtype instead of data" #-}
 -- | Use congruence closure+rewrite rules to reason about SQL queries
 module CongruenceClosure where
 
@@ -17,6 +21,7 @@ import Data.Equality.Analysis (Analysis)
 import Data.Equality.Graph (Language, ClassId, ENode(..))
 import Data.Ord.Deriving (deriveOrd1)
 import Data.Eq.Deriving (deriveEq1)
+import Text.Show.Deriving (deriveShow1)
 import Data.Coerce (coerce)
 import SQL
 import Control.Lens hiding (op)
@@ -24,7 +29,12 @@ import Control.Monad.Reader
 import Control.Monad.Trans.Elevator
 import qualified Data.Map.Strict as M
 import Data.Maybe (catMaybes)
-
+import InlinePrettyEGraph -- Data.Equality.Graph.Dot
+import Prettyprinter
+import Data.Functor.Classes
+import Util(prettyS)
+import RenderHypergraph (renderGv)
+import Unsafe.Coerce (unsafeCoerce)
 
 -- [Note: Why E-Graphs]
 --
@@ -94,13 +104,50 @@ data SomeValue a
     = Name Q.Var
     | Proj a SQL.AField
     | SkolemFun SkolemIdent [a]
-    | Fun SkolemIdent [a]
-    | Joined a a
-    | JoinProj1 a
-    | JoinProj2 a
-    | Try a
+    | Fun String [a]
+    -- | Joined a a
+    | JoinProj Q.Var a
+    -- | JoinProj2 a
+    -- | Try a
     deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
-type SkolemIdent = String
+data SkolemIdent = SkolemID { skolName :: String, skolUniq :: Int }
+    deriving (Eq, Ord, Show)
+
+instance Pretty a => Pretty (SomeValue a) where
+   pretty (Name v) = pretty v
+   pretty (Proj a f) = pretty a <> "." <> pretty f
+   pretty (SkolemFun s as) = "?" <> pretty (skolName s) <> tupled (map pretty as)
+   pretty (Fun s as) = pretty s <> tupled (map pretty as)
+   pretty (JoinProj v a) = pretty a <> ".sources" <> brackets (pretty v)
+
+
+data PrettyDict a
+    = PrettyDict
+    { prettyImpl :: forall dec. a -> Doc dec
+    , prettyListImpl :: forall dec. [a] -> Doc dec
+    }
+
+data Box a = Box a
+data Dict p where
+   Dict :: p => Dict p
+
+instance Show1 SomeValue where
+   liftShowsPrec showI showL _prec val = withPretty (toPrettyDict showI showL) (prettyS val <>)
+   liftShowList showI showL val = withPretty (toPrettyDict showI showL) (prettyS val <>)
+
+toPrettyDict ::  (Int -> a -> ShowS) -> ([a] -> ShowS) -> PrettyDict a
+toPrettyDict show1 showsList = PrettyDict
+    { prettyImpl = \a -> pretty (show1 0 a "")
+    , prettyListImpl = \x -> pretty (showsList x "")
+    }
+
+{-# NOINLINE withPretty #-}
+prettyToDict :: PrettyDict a -> Dict (Pretty a)
+prettyToDict dict = unsafeCoerce (Box dict)
+
+withPretty :: forall a r. PrettyDict a -> (Pretty a => r) -> r
+withPretty dict f = case prettyToDict dict of
+    Dict -> f
 
 deriveEq1   ''SomeValue
 deriveOrd1  ''SomeValue
@@ -114,7 +161,7 @@ instance (Analysis l SomeValue) => MonadEgg l SomeValue (EggT l SomeValue) where
     genSkolem tag = MonadEgg $ do
         i <- S.get
         S.put (i+1)
-        pure (tag <> show i)
+        pure (SkolemID tag i)
     mergeVars l r = liftEgg (void $ merge l r)
 
 addTerm :: (MonadEgg l SomeValue m) => SomeValue ClassId -> m ClassId
@@ -128,7 +175,22 @@ alignFields fields l r =
       mergeVars lf rf
 
 runToGraph :: SQL -> (([AField], ClassId), EGraph () SomeValue)
-runToGraph sql = egraph $ evalStateT (unMonadEgg (runReaderT (makeGraph sql) mempty)) 0
+runToGraph sql = egraph $ flip evalStateT 0 $ unMonadEgg $ flip runReaderT mempty  $ do
+    (fields, cid)<- makeGraph sql 
+    root <- addTerm (Name (Q.Var 0 "root"))
+    liftEgg $ do
+        _ <- merge root cid
+        rebuild
+    pure (fields, cid)
+
+
+dumpGraph :: FilePath -> SQL -> IO ()
+dumpGraph path sql = do
+    let ((_fields, _root), graph) = runToGraph sql
+    renderGv path (toDotGraph graph)
+    -- putStrLn $ "Fields: " <> show fields
+    -- putStrLn $ "Root: " <> show root
+    -- putStrLn $ "Graph: " <> show graph
 
 mkFun :: (MonadEgg l SomeValue m) => String -> [ClassId] -> m ClassId
 mkFun tag args = addTerm (Fun tag args)
@@ -140,15 +202,18 @@ makeGraph :: (MonadReader (M.Map Q.Var ClassId) m, MonadEgg l SomeValue m) => SQ
 makeGraph (OrderBy _ spj) = makeGraph spj
 makeGraph (GroupQ groupBys spj) = do
    groupBysI <- traverse mkExpr groupBys
-   out <- mkSkolemFun "group_fundep" groupBysI
    (fields, inner) <- makeGraph spj
+   out <- mkFun "group" (inner:groupBysI)
+   forM_ groupBysI $ \gk -> do
+      key <- mkSkolemFun "group_key" [out]
+      mergeVars gk key
    alignFields fields out inner
    pure (fields, out)
 makeGraph (Table meta name) = do
-    out <- addTerm (SkolemFun name [])
+    out <- mkSkolemFun name []
     forM_ (coerce (Q.fundeps meta) :: [[String]]) $ \fd -> do
        args <- traverse addTerm (Proj out <$> fd)
-       fun <- mkSkolemFun ("fd_" <> name) args
+       fun <- mkFun ("fd_" <> name) args
        mergeVars out fun
     pure (Q.fields meta, out)
 makeGraph (Slice _ _ spj) = makeGraph spj
@@ -159,15 +224,22 @@ makeGraph (DistinctQ spj) = do
    alignFields fields out inner
    pure (fields, out)
 makeGraph (ASPJ (SPJ {sources, wheres, proj})) = do
-    outs <- traverseOf (each . _2) makeGraph sources
+    outs <- forM sources $ \(k,v) -> do
+        (fields, out) <- makeGraph v
+        name <- addTerm (Name k)
+        mergeVars name out
+        pure (k, (fields, out))
     let bindings = M.fromList [(name, out) | (name, (_, out)) <- outs]
     joinResult <- mkSkolemFun "join" (M.elems bindings)
+    forM_ (M.toList bindings) $ \(k,cid) -> do
+        isProjSource <- mkSkolemFun (prettyS k) [joinResult]
+        mergeVars cid isProjSource
     local (M.union bindings) $ do
         wheresI <- traverse mkWhere wheres
-        projI <- traverse (mkExprQ joinResult) proj
-        forM_ (M.toList projI) $ \(name, out) -> do
-            t <- addTerm (Proj out name)
-            mergeVars out t
+        forM_ (M.toList proj) $ \(k,v) -> do
+            outExpr <- mkExprQ joinResult v 
+            t <- addTerm (Proj joinResult k)
+            mergeVars outExpr t
         out <- mkFilter (catMaybes wheresI) joinResult
         pure (M.keys proj, out)
 
@@ -187,9 +259,12 @@ mkExpr (BOp op l r) = do
    r' <- mkExpr r
    mkFun (show op) [l', r']
 mkExpr (Ref v proj) = do
-   asks (M.lookup v) >>= \case
-       Nothing -> error $ "Unknown variable: " <> show v
-       Just x -> addTerm (Proj x proj)
+   -- asks (M.lookup v) >>= \case
+       -- Nothing -> do
+          x <- addTerm (Name v)
+          addTerm (Proj x proj)
+       -- Just x -> addTerm (Proj x proj)
+mkExpr (AggrOp Q.ScalarFD e) = mkExpr e
 mkExpr (AggrOp op _) = error $ "AggrOp not allowed here: " <> show op
 
 
