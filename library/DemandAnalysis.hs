@@ -25,6 +25,7 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE OverloadedStrings #-}
 module DemandAnalysis  where
+import Control.Monad
 import CompileQuery
 import Data.Data (Data)
 import qualified Data.Map.Strict as M

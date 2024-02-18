@@ -35,6 +35,7 @@ import Data.Functor.Classes
 import Util(prettyS)
 import RenderHypergraph (renderGv)
 import Unsafe.Coerce (unsafeCoerce)
+import Control.Monad
 
 -- [Note: Why E-Graphs]
 --

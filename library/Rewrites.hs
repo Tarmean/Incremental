@@ -30,6 +30,7 @@ import GHC.Stack (HasCallStack)
 import Control.Monad.Reader.Class
 import Control.Lens (traverseOf, each, _1)
 import Data.Maybe (fromMaybe)
+import Data.Monoid(First(..))
 
 
 

@@ -21,6 +21,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (listToMaybe, maybeToList)
 import CompileQuery (Var)
 import Util (prettyS)
+import Control.Monad
 
 
 mergeGroupBys :: Data a => a -> a

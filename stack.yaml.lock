@@ -19,29 +19,16 @@ packages:
   original:
     hackage: monad-control-identity-0.2.0.0@sha256:1ec0ec32b6e29d53481b576ecf2ea71d35d309a013fd9640918d4cfaa63f4e7f,1452
 - completed:
-    commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
+    commit: 031d92db9fc96bc6107669b1cd863854af0f678d
     git: https://github.com/Tarmean/data-reify.git
     name: data-reify
     pantry-tree:
-      sha256: ba064925256d51dd96e14d25bda7164b9696e352d6ad9181e8f8c53c401a6b9c
+      sha256: 704185042b8791c7004461516bb99870240747e0b02ff39bc2f98e0bcc61c1a6
       size: 1214
     version: 0.6.3
   original:
-    commit: b66a3d6217f21252ea4ca195069e85d0c08ee811
+    commit: 031d92db9fc96bc6107669b1cd863854af0f678d
     git: https://github.com/Tarmean/data-reify.git
-- completed:
-    commit: 4d5239c1fb8181e8d92e3a6312ceb2eee3ef619a
-    git: https://github.com/sgraf812/datafix/
-    name: datafix
-    pantry-tree:
-      sha256: a0fcb46499bc1f0ef054edc5dd7c90fc7b90b813104c3d0abc53b73410ab46bf
-      size: 2867
-    subdir: datafix
-    version: 0.0.2.0
-  original:
-    commit: 4d5239c1fb8181e8d92e3a6312ceb2eee3ef619a
-    git: https://github.com/sgraf812/datafix/
-    subdir: datafix
 - completed:
     commit: bd8ac2b0b920c007ce25bac1b7c4137c9e5aadae
     git: https://github.com/Tarmean/hegg/
@@ -62,8 +49,7 @@ packages:
     hackage: pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948
 snapshots:
 - completed:
-    sha256: 1d25e3e0e2edb856951e8903821e0199a1112ab48b76c83f814e4f7596961e89
-    size: 598120
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2023/2/14.yaml
-  original:
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2023/2/14.yaml
+    sha256: 2fdd7d3e54540062ef75ca0a73ca3a804c527dbf8a4cadafabf340e66ac4af40
+    size: 712469
+    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/22/11.yaml
+  original: lts-22.11

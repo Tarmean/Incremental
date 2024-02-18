@@ -9,6 +9,7 @@ import Rewrites (MonadVar (genVar), withVarGenT, maxVar)
 import Data.Functor.Identity
 import qualified Data.Map.Strict as M
 import OpenRec
+import Control.Monad
 
 
 data VarTree = VarTree Var [VarTree] | BindAs Var | UnUsed deriving (Eq, Ord, Show)

@@ -8,6 +8,7 @@
 module Elaborator where
 
 
+import Control.Monad
 import Debug.Trace
 import CompileQuery
 import Control.Monad.Except

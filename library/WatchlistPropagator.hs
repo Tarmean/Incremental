@@ -26,6 +26,7 @@ module WatchlistPropagator where
 
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Control.Monad
 import Control.Monad.State.Strict
 import Control.Lens
 import Data.Generics.Labels ()

@@ -15,6 +15,7 @@ module CompileQuery (module CompileQuery, module Util) where
 import qualified Data.Set as S
 import qualified Data.Map.Strict as M
 import Control.Monad.State
+import Control.Monad
 import Data.Data
 import qualified Data.Map.Lazy as LM
 import Data.Reify

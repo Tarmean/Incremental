@@ -18,6 +18,7 @@ import Data.Typeable ((:~:)(Refl), eqT)
 import OpenRec
 import GHC.Stack
 import Data.Traversable (for)
+import Control.Monad
 
 data HashConsEnv
     = HashConsEnv

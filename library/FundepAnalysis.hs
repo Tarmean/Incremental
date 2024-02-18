@@ -43,6 +43,7 @@
 -- Ironically exactly what differential dataflow would be good at
 module FundepAnalysis where
 
+import Control.Monad
 import WatchlistPropagator
 import OpenRec
 import Control.Monad.Writer (execWriterT, tell)
