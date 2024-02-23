@@ -101,6 +101,30 @@ instance (MonadTrans t, Monad (t m), MonadEgg anl l m) => MonadEgg anl l (Elevat
     genSkolem = lift . genSkolem
     mergeVars = (lift .) . mergeVars
 
+-- | Sql queries as predicate calculus. The query is a boolean predicate like
+-- forall x = (a,b,c), y = (a,h). InTable(x, Users) & InTable(y, Jobs) & b > 2
+data EGLang a
+    = LTuple { tupleId :: a, tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
+    | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
+    | InTable a String -- predicates, is tuple in table
+    | IsNull a -- for notnull, a tuple can be null - this just sets all values null
+    | AOp COp a a -- bin ops
+    | CTrue
+    | CFalse
+    | CNot a -- negation
+    | LSelectProjectJoin { boundVars :: [a], selected :: [a], predicate :: a }
+    | LAggregate {
+        boundVars :: [a],
+        selectAggKey :: [a],
+        selectAggValue,
+        predicate :: a
+    } -- | Groupby is like a select project join, but the select
+                            --is split into two pieces. The key uniquely determines the tuple, as usual.
+                            --The value is the aggregate result for the key. 
+    deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+data COp = CEq | CAnd | COr | CLT | CLTE
+    deriving (Eq, Ord, Show)
+
 data SomeValue a
     = Name Q.Var
     | Proj a SQL.AField
