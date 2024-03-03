@@ -37,6 +37,30 @@ import RenderHypergraph (renderGv)
 import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad
 
+-- thoughtsf.
+-- select * from
+-- users u left outer join
+-- (select * from jobs j natural join project n where j.type = Good) j
+-- where u.id = j.user_id
+
+-- u(uid, uname) in users
+-- nn(u)
+
+-- j(jid, userid, jobtype, projectid) in jobs
+-- p(projectid) in projects
+
+-- #nt
+-- jobtype != good -> #nt = false
+-- #nt = true -> jobtype = good
+-- #nt = true -> nn(j)
+-- #nt = true -> nn(p)
+-- nn(j) -> #nt
+-- n(j) -> !#nt
+-- #nt -> nn(j)
+-- !#nt -> n(j)
+
+-- #ot -> nn(u)
+
 -- [Note: Why E-Graphs]
 --
 -- Take this query:
@@ -108,6 +132,7 @@ data EGLang a
     | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
     | InTable a String -- predicates, is tuple in table
     | IsNull a -- for notnull, a tuple can be null - this just sets all values null
+    | IsFound a
     | AOp COp a a -- bin ops
     | CTrue
     | CFalse
