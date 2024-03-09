@@ -26,6 +26,7 @@ import GHC.Generics (Generic)
 import OpenRec
 import Data.List (intersperse)
 import Util
+import Data.Hashable (Hashable(..))
 import Data.Maybe (catMaybes)
 import Data.Functor.Identity (runIdentity)
 import qualified Data.ByteString.Char8 as BS
@@ -452,6 +453,8 @@ newtype Source = Source { unSource :: Var}
   deriving (Eq, Ord, Show, Data)
 data Var = Var { uniq :: Int, name :: String }
   deriving (Eq, Ord, Show, Data)
+instance Hashable Var where
+  hashWithSalt salt (Var uq _) = hashWithSalt salt uq
 newtype Fun = Fun { unFun :: Var}
   deriving (Eq, Ord, Show, Data)
 type Local = Var

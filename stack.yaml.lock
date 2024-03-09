@@ -30,15 +30,15 @@ packages:
     commit: 031d92db9fc96bc6107669b1cd863854af0f678d
     git: https://github.com/Tarmean/data-reify.git
 - completed:
-    commit: bd8ac2b0b920c007ce25bac1b7c4137c9e5aadae
+    commit: aa0340d8981e0d03943b250614c45527f94d1bc2
     git: https://github.com/Tarmean/hegg/
     name: hegg
     pantry-tree:
-      sha256: 7a13c646d6f6b2cd4eb2f5ce6ac3bf86093e0309ce1a026e5462860bb5f82a24
-      size: 2537
-    version: 0.3.0.0
+      sha256: f654ec0c5f61232469c6e544a42dd6f3238493f4a9c37badbd399733831bd860
+      size: 3554
+    version: 0.5.0.0
   original:
-    commit: bd8ac2b0b920c007ce25bac1b7c4137c9e5aadae
+    commit: aa0340d8981e0d03943b250614c45527f94d1bc2
     git: https://github.com/Tarmean/hegg/
 - completed:
     hackage: pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948

@@ -1,6 +1,9 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MonoLocalBinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE LambdaCase #-}
@@ -13,18 +16,22 @@ module CongruenceClosure where
 
 import Control.Monad.State
 
-import Data.Equality.Graph.Monad
+import Data.Equality.Graph.Monad hiding (gets)
 
+import Control.Monad.Trans.Maybe (MaybeT(..))
 import qualified CompileQuery as Q
 import qualified Control.Monad.State as S
 import Data.Equality.Analysis (Analysis)
 import Data.Equality.Graph (Language, ClassId, ENode(..))
+import qualified Data.Equality.Graph.Lens as Gl
+import Data.Equality.Compiler.API
+import Data.Equality.Matching.Pattern (pat)
 import Data.Ord.Deriving (deriveOrd1)
 import Data.Eq.Deriving (deriveEq1)
 import Text.Show.Deriving (deriveShow1)
 import Data.Coerce (coerce)
 import SQL
-import Control.Lens hiding (op)
+import Control.Lens hiding (op, (.=))
 import Control.Monad.Reader
 import Control.Monad.Trans.Elevator
 import qualified Data.Map.Strict as M
@@ -36,6 +43,8 @@ import Util(prettyS)
 import RenderHypergraph (renderGv)
 import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad
+import Data.Hashable (Hashable)
+import GHC.Generics (Generic)
 
 -- thoughtsf.
 -- select * from
@@ -125,30 +134,48 @@ instance (MonadTrans t, Monad (t m), MonadEgg anl l m) => MonadEgg anl l (Elevat
     genSkolem = lift . genSkolem
     mergeVars = (lift .) . mergeVars
 
+type FDIdent = String
+
 -- | Sql queries as predicate calculus. The query is a boolean predicate like
 -- forall x = (a,b,c), y = (a,h). InTable(x, Users) & InTable(y, Jobs) & b > 2
 data EGLang a
-    = LTuple { tupleId :: a, tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
-    | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
+    = LTuple { tupleId :: a, tupleVals :: a} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
+    -- | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
     | InTable a String -- predicates, is tuple in table
     | IsNull a -- for notnull, a tuple can be null - this just sets all values null
     | IsFound a
+    | TupleProj a Int
+    | FunDep FDIdent [a]
     | AOp COp a a -- bin ops
     | CTrue
     | CFalse
     | CNot a -- negation
-    | LSelectProjectJoin { boundVars :: [a], selected :: [a], predicate :: a }
-    | LAggregate {
-        boundVars :: [a],
-        selectAggKey :: [a],
-        selectAggValue,
-        predicate :: a
-    } -- | Groupby is like a select project join, but the select
-                            --is split into two pieces. The key uniquely determines the tuple, as usual.
-                            --The value is the aggregate result for the key. 
-    deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+    | LSelectProjectJoin { boundVars :: a, predicate :: a }
+    | LList [a] 
+    -- | LAggregate {
+    --    boundVars :: [a],
+    --    selectAggKey :: [a],
+    --    selectAggValue,
+    --    predicate :: a
+    --} -- | Groupby is like a select project join, but the select
+    --                        --is split into two pieces. The key uniquely determines the tuple, as usual.
+    --                        --The value is the aggregate result for the key. 
+    deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic, Hashable)
+
+-- addProjections _ = forEachMatch ["r" .= pat (LTuple "xs" "ys")] $ \subst -> do
+--     l <- subst "r"
+--     ns <- gets (^. Gl._class l . Gl._nodes) 
+--     forM_ ns $ \n -> case n of
+--         Node (LList ms) -> do
+--             forM_ (zip [0..] ms) $ \(i, m) -> do
+--               o <- subst (pat (TupleProj m i))
+--               merge l o
+--         _ -> pure ()
+
 data COp = CEq | CAnd | COr | CLT | CLTE
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show, Generic, Hashable)
+
+
 
 data SomeValue a
     = Name Q.Var
@@ -158,10 +185,10 @@ data SomeValue a
     -- | Joined a a
     | JoinProj Q.Var a
     -- | JoinProj2 a
-    -- | Try a
-    deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+    -- | Try a 
+    deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic, Hashable)
 data SkolemIdent = SkolemID { skolName :: String, skolUniq :: Int }
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show, Generic, Hashable)
 
 instance Pretty a => Pretty (SomeValue a) where
    pretty (Name v) = pretty v
@@ -195,13 +222,17 @@ toPrettyDict show1 showsList = PrettyDict
 prettyToDict :: PrettyDict a -> Dict (Pretty a)
 prettyToDict dict = unsafeCoerce (Box dict)
 
+tryM :: Monad m => MaybeT m a -> m ()
+tryM m = do
+  _ <- runMaybeT m
+  pure ()
+
 withPretty :: forall a r. PrettyDict a -> (Pretty a => r) -> r
 withPretty dict f = case prettyToDict dict of
     Dict -> f
 
 deriveEq1   ''SomeValue
 deriveOrd1  ''SomeValue
-instance Language SomeValue where
 instance (Analysis l SomeValue) => MonadEgg l SomeValue (EggT l SomeValue) where
     liftEgg = MonadEgg . lift
     genVar = MonadEgg $ do

@@ -45,7 +45,7 @@ extra-deps:
   #   subdirs: 
   #     - datafix
   - git: https://github.com/Tarmean/hegg/
-    commit: 0ca6240f504d3b2738ad90197e6edcf42ee03b4a
+    commit: aa0340d8981e0d03943b250614c45527f94d1bc2
 
   - pomaps-0.2.0.1@sha256:b9b50a8d6836decbd249a167682aeaeec637970eeb56af9a93184694f7fac69e,2948
 allow-newer: true

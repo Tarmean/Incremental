@@ -1,0 +1,77 @@
+digraph egraph {
+    graph [compound=true
+          ,clusterrank=local];
+    subgraph cluster_3 {
+        graph [style=dotted];
+        3.0 [label="SkolemFun \"group_fundep0\" [5]"];
+    }
+    subgraph cluster_4 {
+        graph [style=dotted];
+        4.0 [label="Name (Var {uniq = 4, name = \"l\"})"];
+        4.1 [label="Name (Var {uniq = 9, name = \"p\"})"];
+        4.2 [label="SkolemFun \"stash_31\" []"];
+        4.3 [label="SkolemFun \"stash_33\" []"];
+        4.4 [label="Fun \"fd_stash_3\" [5]"];
+        4.5 [label="Fun \"fd_stash_3\" [5]"];
+    }
+    subgraph cluster_5 {
+        graph [style=dotted];
+        5.0 [label="Proj 4 \"f2\""];
+        5.1 [label="Proj 4 \"f2\""];
+        5.2 [label="Proj 9 \"f0\""];
+        5.3 [label="Proj 4 \"f2\""];
+    }
+    subgraph cluster_9 {
+        graph [style=dotted];
+        9.0 [label="Name (Var {uniq = 14, name = \"l\"})"];
+        9.1 [label="SkolemFun \"job2\" []"];
+    }
+    subgraph cluster_13 {
+        graph [style=dotted];
+        13.0 [label="SkolemFun \"join4\" [4,4,9]"];
+    }
+    subgraph cluster_19 {
+        graph [style=dotted];
+        19.0 [label="Proj 3 \"f0\""];
+        19.1 [label="Proj 4 \"f1\""];
+        19.2 [label="Proj 13 \"f0\""];
+    }
+    subgraph cluster_20 {
+        graph [style=dotted];
+        20.0 [label="Proj 3 \"f1\""];
+        20.1 [label="Proj 13 \"f1\""];
+        20.2 [label="SkolemFun \"SumT5\" [13]"];
+    }
+    3.0 -> 5.0 [lhead=cluster_5
+               ,label=0];
+    4.4 -> 5.0 [lhead=cluster_5
+               ,label=0];
+    4.5 -> 5.0 [lhead=cluster_5
+               ,label=0];
+    5.0 -> 4.0 [lhead=cluster_4
+               ,label=0];
+    5.1 -> 4.0 [lhead=cluster_4
+               ,label=0];
+    5.2 -> 9.0 [lhead=cluster_9
+               ,label=0];
+    5.3 -> 4.0 [lhead=cluster_4
+               ,label=0];
+    13.0 -> 4.0 [lhead=cluster_4
+                ,label=0];
+    13.0 -> 4.0 [lhead=cluster_4
+                ,label=1];
+    13.0 -> 9.0 [lhead=cluster_9
+                ,label=2];
+    19.0 -> 3.0 [lhead=cluster_3
+                ,label=0];
+    19.1 -> 4.0 [lhead=cluster_4
+                ,label=0];
+    19.2 -> 13.0 [lhead=cluster_13
+                 ,label=0];
+    20.0 -> 3.0 [lhead=cluster_3
+                ,label=0];
+    20.1 -> 13.0 [lhead=cluster_13
+                 ,label=0];
+    20.2 -> 13.0 [lhead=cluster_13
+                 ,label=0];
+}
