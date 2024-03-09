@@ -42,6 +42,7 @@ library:
   - graphviz
   - deriving-compat
   - text
+  - hashable
   source-dirs: library
 
 

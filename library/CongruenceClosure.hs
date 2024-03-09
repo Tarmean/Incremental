@@ -7,6 +7,9 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Eta reduce" #-}
 {-# HLINT ignore "Use newtype instead of data" #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE MonoLocalBinds #-}
 -- | Use congruence closure+rewrite rules to reason about SQL queries
 module CongruenceClosure where
 
@@ -17,14 +20,14 @@ import Data.Equality.Graph.Monad
 
 import qualified CompileQuery as Q
 import qualified Control.Monad.State as S
+import Data.Hashable (Hashable)
+import Data.Equality.Compiler.API as API
 import Data.Equality.Analysis (Analysis)
 import Data.Equality.Graph (Language, ClassId, ENode(..))
 import Data.Ord.Deriving (deriveOrd1)
 import Data.Eq.Deriving (deriveEq1)
-import Text.Show.Deriving (deriveShow1)
 import Data.Coerce (coerce)
 import SQL
-import Control.Lens hiding (op)
 import Control.Monad.Reader
 import Control.Monad.Trans.Elevator
 import qualified Data.Map.Strict as M
@@ -36,6 +39,7 @@ import Util(prettyS)
 import RenderHypergraph (renderGv)
 import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad
+import GHC.Generics (Generic)
 
 -- thoughtsf.
 -- select * from
@@ -110,7 +114,7 @@ import Control.Monad
 
 
 newtype EggT anl l a = MonadEgg { unMonadEgg :: StateT Int (EGraphM anl l ) a }
-    deriving (Functor, Applicative, Monad)
+    deriving newtype (Functor, Applicative, Monad)
 
 class (Monad m, Analysis anl l, Language l) => MonadEgg anl l m | m -> anl l where
     liftEgg :: EGraphM anl l a -> m a
@@ -137,7 +141,8 @@ data EGLang a
     | CTrue
     | CFalse
     | CNot a -- negation
-    | LSelectProjectJoin { boundVars :: [a], selected :: [a], predicate :: a }
+    | a :=> a -- implication for proofs
+    | LSelectProjectJoin { producedTuple :: a, predicate :: a }
     | LAggregate {
         boundVars :: [a],
         selectAggKey :: [a],
@@ -146,9 +151,14 @@ data EGLang a
     } -- | Groupby is like a select project join, but the select
                             --is split into two pieces. The key uniquely determines the tuple, as usual.
                             --The value is the aggregate result for the key. 
-    deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+    deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable)
+    deriving (Generic)
+
+rules :: API.Rule f m
+rules = undefined
+deriving anyclass instance Hashable a => Hashable (EGLang a)
 data COp = CEq | CAnd | COr | CLT | CLTE
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show ,Generic, Hashable)
 
 data SomeValue a
     = Name Q.Var
@@ -159,9 +169,9 @@ data SomeValue a
     | JoinProj Q.Var a
     -- | JoinProj2 a
     -- | Try a
-    deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
+    deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Hashable, Generic)
 data SkolemIdent = SkolemID { skolName :: String, skolUniq :: Int }
-    deriving (Eq, Ord, Show)
+    deriving (Eq, Ord, Show, Generic, Hashable)
 
 instance Pretty a => Pretty (SomeValue a) where
    pretty (Name v) = pretty v
@@ -201,7 +211,6 @@ withPretty dict f = case prettyToDict dict of
 
 deriveEq1   ''SomeValue
 deriveOrd1  ''SomeValue
-instance Language SomeValue where
 instance (Analysis l SomeValue) => MonadEgg l SomeValue (EggT l SomeValue) where
     liftEgg = MonadEgg . lift
     genVar = MonadEgg $ do
@@ -218,7 +227,7 @@ addTerm :: (MonadEgg l SomeValue m) => SomeValue ClassId -> m ClassId
 addTerm = liftEgg . add . coerce
 
 alignFields :: (Monad m, Foldable t, MonadEgg anl SomeValue m) => t AField -> ClassId -> ClassId -> m ()
-alignFields fields l r = 
+alignFields fields l r =
   forM_ fields $ \field -> do
       lf <- addTerm (Proj l field)
       rf <- addTerm (Proj r field)
@@ -226,7 +235,7 @@ alignFields fields l r =
 
 runToGraph :: SQL -> (([AField], ClassId), EGraph () SomeValue)
 runToGraph sql = egraph $ flip evalStateT 0 $ unMonadEgg $ flip runReaderT mempty  $ do
-    (fields, cid)<- makeGraph sql 
+    (fields, cid)<- makeGraph sql
     root <- addTerm (Name (Q.Var 0 "root"))
     liftEgg $ do
         _ <- merge root cid
@@ -262,14 +271,14 @@ makeGraph (GroupQ groupBys spj) = do
 makeGraph (Table meta name) = do
     out <- mkSkolemFun name []
     forM_ (coerce (Q.fundeps meta) :: [[String]]) $ \fd -> do
-       args <- traverse addTerm (Proj out <$> fd)
+       args <- traverse (addTerm . Proj out) fd
        fun <- mkFun ("fd_" <> name) args
        mergeVars out fun
     pure (Q.fields meta, out)
 makeGraph (Slice _ _ spj) = makeGraph spj
 makeGraph (DistinctQ spj) = do
    (fields, inner) <- makeGraph spj
-   innerFields <- traverse addTerm (Proj inner <$> fields)
+   innerFields <- traverse (addTerm . Proj inner) fields
    out <- mkSkolemFun "distinct" innerFields
    alignFields fields out inner
    pure (fields, out)
@@ -287,16 +296,16 @@ makeGraph (ASPJ (SPJ {sources, wheres, proj})) = do
     local (M.union bindings) $ do
         wheresI <- traverse mkWhere wheres
         forM_ (M.toList proj) $ \(k,v) -> do
-            outExpr <- mkExprQ joinResult v 
+            outExpr <- mkExprQ joinResult v
             t <- addTerm (Proj joinResult k)
             mergeVars outExpr t
         out <- mkFilter (catMaybes wheresI) joinResult
         pure (M.keys proj, out)
 
 mkFilter :: MonadEgg l SomeValue m => [ClassId] -> ClassId -> m ClassId
-mkFilter [] p = pure p 
+mkFilter [] p = pure p
 mkFilter _ _ = error "Todo: Add non-equijoins"
-    
+
 mkExprQ :: (MonadEgg l SomeValue m, MonadReader (M.Map Q.Var ClassId) m) => ClassId -> Expr -> m ClassId
 mkExprQ ctx (AggrOp op _) = mkSkolemFun (show op) [ctx]
 mkExprQ _ a = mkExpr a
