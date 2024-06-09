@@ -10,6 +10,9 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Eta reduce" #-}
 {-# HLINT ignore "Use newtype instead of data" #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE MonoLocalBinds #-}
 -- | Use congruence closure+rewrite rules to reason about SQL queries
 module CongruenceClosure where
 
@@ -21,6 +24,8 @@ import Data.Equality.Graph.Monad hiding (gets)
 import Control.Monad.Trans.Maybe (MaybeT(..))
 import qualified CompileQuery as Q
 import qualified Control.Monad.State as S
+import Data.Hashable (Hashable)
+import Data.Equality.Compiler.API as API
 import Data.Equality.Analysis (Analysis)
 import Data.Equality.Graph (Language, ClassId, ENode(..))
 import qualified Data.Equality.Graph.Lens as Gl
@@ -28,7 +33,6 @@ import Data.Equality.Compiler.API
 import Data.Equality.Matching.Pattern (pat)
 import Data.Ord.Deriving (deriveOrd1)
 import Data.Eq.Deriving (deriveEq1)
-import Text.Show.Deriving (deriveShow1)
 import Data.Coerce (coerce)
 import SQL
 import Control.Lens hiding (op, (.=))
@@ -43,7 +47,10 @@ import Util(prettyS)
 import RenderHypergraph (renderGv)
 import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad
+<<<<<<< HEAD
 import Data.Hashable (Hashable)
+=======
+>>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
 import GHC.Generics (Generic)
 
 -- thoughtsf.
@@ -119,7 +126,7 @@ import GHC.Generics (Generic)
 
 
 newtype EggT anl l a = MonadEgg { unMonadEgg :: StateT Int (EGraphM anl l ) a }
-    deriving (Functor, Applicative, Monad)
+    deriving newtype (Functor, Applicative, Monad)
 
 class (Monad m, Analysis anl l, Language l) => MonadEgg anl l m | m -> anl l where
     liftEgg :: EGraphM anl l a -> m a
@@ -139,6 +146,7 @@ type FDIdent = String
 -- | Sql queries as predicate calculus. The query is a boolean predicate like
 -- forall x = (a,b,c), y = (a,h). InTable(x, Users) & InTable(y, Jobs) & b > 2
 data EGLang a
+<<<<<<< HEAD
     = LTuple { tupleId :: a, tupleVals :: a} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
     -- | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
     | InTable a String -- predicates, is tuple in table
@@ -146,10 +154,19 @@ data EGLang a
     | IsFound a
     | TupleProj a Int
     | FunDep FDIdent [a]
+=======
+    = LTuple { tupleId :: a, tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
+    | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
+    | InTable a a -- predicates, is tuple in table
+    | IsNull a -- for notnull, a tuple can be null - this just sets all values null
+    | IsFound a
+    | BaseTable String
+>>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
     | AOp COp a a -- bin ops
     | CTrue
     | CFalse
     | CNot a -- negation
+<<<<<<< HEAD
     | LSelectProjectJoin { boundVars :: a, predicate :: a }
     | LList [a] 
     -- | LAggregate {
@@ -176,6 +193,68 @@ data COp = CEq | CAnd | COr | CLT | CLTE
     deriving (Eq, Ord, Show, Generic, Hashable)
 
 
+=======
+    -- | a :=> a -- implication for proofs
+    | LSelectProjectJoin { producedTuple :: a, predicate :: a }
+    | LAggregate {
+        boundVars :: [a],
+        selectAggKey :: [a],
+        selectAggValue,
+        predicate :: a
+    } -- | Groupby is like a select project join, but the select
+                            --is split into two pieces. The key uniquely determines the tuple, as usual.
+                            --The value is the aggregate result for the key. 
+    deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable)
+    deriving (Generic)
+
+data Mult = Zero | One | Many
+  deriving (Eq, Ord, Show, Enum, Bounded)
+data Range a = Range { low :: a, high:: a}
+  deriving (Eq, Ord, Show)
+
+union :: Ord a => Range a -> Range a -> Range a
+union (Range l r)(Range x y) = Range (min l x) (max r y)
+intersect :: Ord a => Range a -> Range a -> Range a
+intersect (Range l r)(Range x y) = Range (max l x) (min r y)
+
+mult :: Mult -> Mult -> Mult
+mult Zero _ = Zero
+mult _ Zero = Zero
+mult One One = One
+mult _ _ = Many
+appRange :: (t1 -> t2 -> a) -> Range t1 -> Range t2 -> Range a
+appRange f (Range l r) (Range x y) = Range (f l x) (f r y)
+
+multRange :: Range Mult -> Range Mult -> Range Mult
+multRange = appRange mult
+addRange :: Range Mult -> Range Mult -> Range Mult
+addRange = appRange max
+
+isBoolean :: EGLang a -> Bool
+isBoolean (IsNull {}) = True
+isBoolean (IsFound {}) = True
+isBoolean (AOp {}) = True
+isBoolean (CTrue {}) = True
+isBoolean (CFalse {}) = True
+isBoolean (CNot {}) = True
+isBoolean _ = False
+ana :: EGLang (Range Mult) -> Range Mult
+ana CTrue = Range One One
+ana CFalse = Range Zero Zero
+ana b | isBoolean b = Range Zero One
+ana (LFun _ ls) = Range (minimum (fmap low ls)) (maximum (fmap high ls))
+ana (InTable _ a) = a
+ana _ = Range Zero Many
+
+
+
+
+rules :: API.Rule f m
+rules = undefined
+deriving anyclass instance Hashable a => Hashable (EGLang a)
+data COp = CEq | CAnd | COr | CLT | CLTE
+    deriving (Eq, Ord, Show ,Generic, Hashable)
+>>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
 
 data SomeValue a
     = Name Q.Var
@@ -185,8 +264,13 @@ data SomeValue a
     -- | Joined a a
     | JoinProj Q.Var a
     -- | JoinProj2 a
+<<<<<<< HEAD
     -- | Try a 
     deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic, Hashable)
+=======
+    -- | Try a
+    deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Hashable, Generic)
+>>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
 data SkolemIdent = SkolemID { skolName :: String, skolUniq :: Int }
     deriving (Eq, Ord, Show, Generic, Hashable)
 
@@ -249,7 +333,7 @@ addTerm :: (MonadEgg l SomeValue m) => SomeValue ClassId -> m ClassId
 addTerm = liftEgg . add . coerce
 
 alignFields :: (Monad m, Foldable t, MonadEgg anl SomeValue m) => t AField -> ClassId -> ClassId -> m ()
-alignFields fields l r = 
+alignFields fields l r =
   forM_ fields $ \field -> do
       lf <- addTerm (Proj l field)
       rf <- addTerm (Proj r field)
@@ -257,7 +341,7 @@ alignFields fields l r =
 
 runToGraph :: SQL -> (([AField], ClassId), EGraph () SomeValue)
 runToGraph sql = egraph $ flip evalStateT 0 $ unMonadEgg $ flip runReaderT mempty  $ do
-    (fields, cid)<- makeGraph sql 
+    (fields, cid)<- makeGraph sql
     root <- addTerm (Name (Q.Var 0 "root"))
     liftEgg $ do
         _ <- merge root cid
@@ -293,14 +377,14 @@ makeGraph (GroupQ groupBys spj) = do
 makeGraph (Table meta name) = do
     out <- mkSkolemFun name []
     forM_ (coerce (Q.fundeps meta) :: [[String]]) $ \fd -> do
-       args <- traverse addTerm (Proj out <$> fd)
+       args <- traverse (addTerm . Proj out) fd
        fun <- mkFun ("fd_" <> name) args
        mergeVars out fun
     pure (Q.fields meta, out)
 makeGraph (Slice _ _ spj) = makeGraph spj
 makeGraph (DistinctQ spj) = do
    (fields, inner) <- makeGraph spj
-   innerFields <- traverse addTerm (Proj inner <$> fields)
+   innerFields <- traverse (addTerm . Proj inner) fields
    out <- mkSkolemFun "distinct" innerFields
    alignFields fields out inner
    pure (fields, out)
@@ -318,16 +402,16 @@ makeGraph (ASPJ (SPJ {sources, wheres, proj})) = do
     local (M.union bindings) $ do
         wheresI <- traverse mkWhere wheres
         forM_ (M.toList proj) $ \(k,v) -> do
-            outExpr <- mkExprQ joinResult v 
+            outExpr <- mkExprQ joinResult v
             t <- addTerm (Proj joinResult k)
             mergeVars outExpr t
         out <- mkFilter (catMaybes wheresI) joinResult
         pure (M.keys proj, out)
 
 mkFilter :: MonadEgg l SomeValue m => [ClassId] -> ClassId -> m ClassId
-mkFilter [] p = pure p 
+mkFilter [] p = pure p
 mkFilter _ _ = error "Todo: Add non-equijoins"
-    
+
 mkExprQ :: (MonadEgg l SomeValue m, MonadReader (M.Map Q.Var ClassId) m) => ClassId -> Expr -> m ClassId
 mkExprQ ctx (AggrOp op _) = mkSkolemFun (show op) [ctx]
 mkExprQ _ a = mkExpr a

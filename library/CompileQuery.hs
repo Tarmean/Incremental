@@ -10,6 +10,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE DeriveAnyClass #-}
 -- | Synatx tree types, pretty printing, and core Definitions
 module CompileQuery (module CompileQuery, module Util) where
 import qualified Data.Set as S
@@ -30,6 +31,7 @@ import Data.Hashable (Hashable(..))
 import Data.Maybe (catMaybes)
 import Data.Functor.Identity (runIdentity)
 import qualified Data.ByteString.Char8 as BS
+import Data.Hashable (Hashable)
 
 -- Plan for aggregates:
 --
@@ -455,6 +457,8 @@ data Var = Var { uniq :: Int, name :: String }
   deriving (Eq, Ord, Show, Data)
 instance Hashable Var where
   hashWithSalt salt (Var uq _) = hashWithSalt salt uq
+  deriving stock (Eq, Ord, Show, Data, Generic)
+  deriving anyclass Hashable
 newtype Fun = Fun { unFun :: Var}
   deriving (Eq, Ord, Show, Data)
 type Local = Var
