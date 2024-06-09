@@ -134,14 +134,15 @@ instance (MonadTrans t, Monad (t m), MonadEgg anl l m) => MonadEgg anl l (Elevat
 data EGLang a
     = LTuple { tupleId :: a, tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
     | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
-    | InTable a String -- predicates, is tuple in table
+    | InTable a a -- predicates, is tuple in table
     | IsNull a -- for notnull, a tuple can be null - this just sets all values null
     | IsFound a
+    | BaseTable String
     | AOp COp a a -- bin ops
     | CTrue
     | CFalse
     | CNot a -- negation
-    | a :=> a -- implication for proofs
+    -- | a :=> a -- implication for proofs
     | LSelectProjectJoin { producedTuple :: a, predicate :: a }
     | LAggregate {
         boundVars :: [a],
@@ -153,6 +154,48 @@ data EGLang a
                             --The value is the aggregate result for the key. 
     deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable)
     deriving (Generic)
+
+data Mult = Zero | One | Many
+  deriving (Eq, Ord, Show, Enum, Bounded)
+data Range a = Range { low :: a, high:: a}
+  deriving (Eq, Ord, Show)
+
+union :: Ord a => Range a -> Range a -> Range a
+union (Range l r)(Range x y) = Range (min l x) (max r y)
+intersect :: Ord a => Range a -> Range a -> Range a
+intersect (Range l r)(Range x y) = Range (max l x) (min r y)
+
+mult :: Mult -> Mult -> Mult
+mult Zero _ = Zero
+mult _ Zero = Zero
+mult One One = One
+mult _ _ = Many
+appRange :: (t1 -> t2 -> a) -> Range t1 -> Range t2 -> Range a
+appRange f (Range l r) (Range x y) = Range (f l x) (f r y)
+
+multRange :: Range Mult -> Range Mult -> Range Mult
+multRange = appRange mult
+addRange :: Range Mult -> Range Mult -> Range Mult
+addRange = appRange max
+
+isBoolean :: EGLang a -> Bool
+isBoolean (IsNull {}) = True
+isBoolean (IsFound {}) = True
+isBoolean (AOp {}) = True
+isBoolean (CTrue {}) = True
+isBoolean (CFalse {}) = True
+isBoolean (CNot {}) = True
+isBoolean _ = False
+ana :: EGLang (Range Mult) -> Range Mult
+ana CTrue = Range One One
+ana CFalse = Range Zero Zero
+ana b | isBoolean b = Range Zero One
+ana (LFun _ ls) = Range (minimum (fmap low ls)) (maximum (fmap high ls))
+ana (InTable _ a) = a
+ana _ = Range Zero Many
+
+
+
 
 rules :: API.Rule f m
 rules = undefined
