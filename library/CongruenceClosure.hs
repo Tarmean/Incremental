@@ -1,7 +1,7 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE MonoLocalBinds #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DerivingVia #-}
@@ -10,9 +10,9 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Eta reduce" #-}
 {-# HLINT ignore "Use newtype instead of data" #-}
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE MonoLocalBinds #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 -- | Use congruence closure+rewrite rules to reason about SQL queries
 module CongruenceClosure where
 
@@ -24,18 +24,16 @@ import Data.Equality.Graph.Monad hiding (gets)
 import Control.Monad.Trans.Maybe (MaybeT(..))
 import qualified CompileQuery as Q
 import qualified Control.Monad.State as S
-import Data.Hashable (Hashable)
-import Data.Equality.Compiler.API as API
 import Data.Equality.Analysis (Analysis)
 import Data.Equality.Graph (Language, ClassId, ENode(..))
+import qualified Data.Equality.Graph.Monad as Egm
 import qualified Data.Equality.Graph.Lens as Gl
-import Data.Equality.Compiler.API
 import Data.Equality.Matching.Pattern (pat)
+import Data.Equality.Compiler.API as API
 import Data.Ord.Deriving (deriveOrd1)
 import Data.Eq.Deriving (deriveEq1)
 import Data.Coerce (coerce)
 import SQL
-import Control.Lens hiding (op, (.=))
 import Control.Monad.Reader
 import Control.Monad.Trans.Elevator
 import qualified Data.Map.Strict as M
@@ -47,11 +45,10 @@ import Util(prettyS)
 import RenderHypergraph (renderGv)
 import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad
-<<<<<<< HEAD
 import Data.Hashable (Hashable)
-=======
->>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
 import GHC.Generics (Generic)
+import qualified Data.Equality.Graph as Eg
+import Control.Lens
 
 -- thoughtsf.
 -- select * from
@@ -146,62 +143,24 @@ type FDIdent = String
 -- | Sql queries as predicate calculus. The query is a boolean predicate like
 -- forall x = (a,b,c), y = (a,h). InTable(x, Users) & InTable(y, Jobs) & b > 2
 data EGLang a
-<<<<<<< HEAD
-    = LTuple { tupleId :: a, tupleVals :: a} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
-    -- | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
-    | InTable a String -- predicates, is tuple in table
-    | IsNull a -- for notnull, a tuple can be null - this just sets all values null
-    | IsFound a
-    | TupleProj a Int
-    | FunDep FDIdent [a]
-=======
-    = LTuple { tupleId :: a, tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
+    = LTuple { tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
     | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
     | InTable a a -- predicates, is tuple in table
     | IsNull a -- for notnull, a tuple can be null - this just sets all values null
     | IsFound a
     | BaseTable String
->>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
     | AOp COp a a -- bin ops
     | CTrue
     | CFalse
     | CNot a -- negation
-<<<<<<< HEAD
-    | LSelectProjectJoin { boundVars :: a, predicate :: a }
-    | LList [a] 
-    -- | LAggregate {
-    --    boundVars :: [a],
-    --    selectAggKey :: [a],
-    --    selectAggValue,
-    --    predicate :: a
-    --} -- | Groupby is like a select project join, but the select
-    --                        --is split into two pieces. The key uniquely determines the tuple, as usual.
-    --                        --The value is the aggregate result for the key. 
-    deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic, Hashable)
-
--- addProjections _ = forEachMatch ["r" .= pat (LTuple "xs" "ys")] $ \subst -> do
---     l <- subst "r"
---     ns <- gets (^. Gl._class l . Gl._nodes) 
---     forM_ ns $ \n -> case n of
---         Node (LList ms) -> do
---             forM_ (zip [0..] ms) $ \(i, m) -> do
---               o <- subst (pat (TupleProj m i))
---               merge l o
---         _ -> pure ()
-
-data COp = CEq | CAnd | COr | CLT | CLTE
-    deriving (Eq, Ord, Show, Generic, Hashable)
-
-
-=======
     -- | a :=> a -- implication for proofs
     | LSelectProjectJoin { producedTuple :: a, predicate :: a }
-    | LAggregate {
-        boundVars :: [a],
-        selectAggKey :: [a],
-        selectAggValue,
-        predicate :: a
-    } -- | Groupby is like a select project join, but the select
+    -- | LAggregate {
+    --     boundVars :: [a],
+    --     selectAggKey :: [a],
+    --     selectAggValue,
+    --     predicate :: a
+    -- } -- | Groupby is like a select project join, but the select
                             --is split into two pieces. The key uniquely determines the tuple, as usual.
                             --The value is the aggregate result for the key. 
     deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable)
@@ -222,8 +181,9 @@ mult Zero _ = Zero
 mult _ Zero = Zero
 mult One One = One
 mult _ _ = Many
-appRange :: (t1 -> t2 -> a) -> Range t1 -> Range t2 -> Range a
-appRange f (Range l r) (Range x y) = Range (f l x) (f r y)
+appRange :: (Ord t1, Ord t2, Ord a, Bounded a) => (t1 -> t2 -> a) -> Range t1 -> Range t2 -> Range a
+appRange f (l ::: r) (x ::: y) = f l x ::: f r y
+appRange _ _ _ = Nil
 
 multRange :: Range Mult -> Range Mult -> Range Mult
 multRange = appRange mult
@@ -233,28 +193,59 @@ addRange = appRange max
 isBoolean :: EGLang a -> Bool
 isBoolean (IsNull {}) = True
 isBoolean (IsFound {}) = True
-isBoolean (AOp {}) = True
-isBoolean (CTrue {}) = True
-isBoolean (CFalse {}) = True
-isBoolean (CNot {}) = True
+-- isBoolean (CNot {}) = True
 isBoolean _ = False
+
+
+pattern (:::) :: Ord a => a -> a -> Range a
+pattern l ::: r <- (splitLessThan -> Just (l,r))
+  where
+    l ::: r = Range l r
+splitLessThan :: Ord b => Range b -> Maybe (b, b)
+splitLessThan (Range x y)
+  | x <= y = Just (x,y)
+  | otherwise = Nothing
+pattern Nil :: (Ord a, Bounded a) => Range a
+pattern Nil <- (splitLessThan -> Nothing)
+  where
+    Nil = Range maxBound minBound
+{-# COMPLETE (:::), Nil #-}
+
+
 ana :: EGLang (Range Mult) -> Range Mult
-ana CTrue = Range One One
-ana CFalse = Range Zero Zero
-ana b | isBoolean b = Range Zero One
-ana (LFun _ ls) = Range (minimum (fmap low ls)) (maximum (fmap high ls))
+ana CTrue = One ::: One
+ana CFalse = Zero ::: Zero
+ana (CNot (x ::: y)) =  flipR y ::: flipR x
+  where
+     flipR Zero = Many
+     flipR _ = Zero
+ana (AOp CAnd l r) = multRange l r
+ana (AOp COr l r) = addRange l r
+ana b | isBoolean b = Zero ::: One
+-- ana (LFun _ ls) = Range (minimum (fmap low ls)) (maximum (fmap high ls))
+ana (LFun _ ls) = Zero ::: maximum (fmap high ls)
 ana (InTable _ a) = a
-ana _ = Range Zero Many
+ana _ = Zero ::: Many
+
+-- |x|=1 -> |x.y| = 1
+-- Tuple[a...c] = foldl1 mult a...c
+--
 
 
 
 
-rules :: API.Rule f m
-rules = undefined
+rules ::  forall m. (Analysis (Range Mult) EGLang, MonadState (EGraph (Range Mult) EGLang) m) => API.Rule EGLang m
+rules = API.forEachMatch @(Range Mult) [pat (InTable "l" "a") API..= pat CTrue] $ \toCid -> do
+    a <- toCid "a"
+    anal <- gets (^. Gl._class a . Gl._data)
+    case anal of
+        One ::: One -> do
+            -- ("l" API.~ "a") toCid
+            pure ()
+        _ -> pure ()
 deriving anyclass instance Hashable a => Hashable (EGLang a)
 data COp = CEq | CAnd | COr | CLT | CLTE
     deriving (Eq, Ord, Show ,Generic, Hashable)
->>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
 
 data SomeValue a
     = Name Q.Var
@@ -264,13 +255,8 @@ data SomeValue a
     -- | Joined a a
     | JoinProj Q.Var a
     -- | JoinProj2 a
-<<<<<<< HEAD
-    -- | Try a 
-    deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Generic, Hashable)
-=======
     -- | Try a
     deriving (Eq, Ord, Show, Functor, Foldable, Traversable, Hashable, Generic)
->>>>>>> 951dff022790d2f9e4cefe7e08b642ccb3c48649
 data SkolemIdent = SkolemID { skolName :: String, skolUniq :: Int }
     deriving (Eq, Ord, Show, Generic, Hashable)
 

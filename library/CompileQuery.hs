@@ -454,11 +454,10 @@ type RecLang = Lang' 'Rec
 newtype Source = Source { unSource :: Var}
   deriving (Eq, Ord, Show, Data)
 data Var = Var { uniq :: Int, name :: String }
-  deriving (Eq, Ord, Show, Data)
+  deriving stock (Eq, Ord, Show, Data, Generic)
 instance Hashable Var where
   hashWithSalt salt (Var uq _) = hashWithSalt salt uq
-  deriving stock (Eq, Ord, Show, Data, Generic)
-  deriving anyclass Hashable
+  
 newtype Fun = Fun { unFun :: Var}
   deriving (Eq, Ord, Show, Data)
 type Local = Var
