@@ -26,10 +26,6 @@ import qualified CompileQuery as Q
 import qualified Control.Monad.State as S
 import Data.Equality.Analysis (Analysis)
 import Data.Equality.Graph (Language, ClassId, ENode(..))
-import qualified Data.Equality.Graph.Monad as Egm
-import qualified Data.Equality.Graph.Lens as Gl
-import Data.Equality.Matching.Pattern (pat)
-import Data.Equality.Compiler.API as API
 import Data.Ord.Deriving (deriveOrd1)
 import Data.Eq.Deriving (deriveEq1)
 import Data.Coerce (coerce)
@@ -47,8 +43,6 @@ import Unsafe.Coerce (unsafeCoerce)
 import Control.Monad
 import Data.Hashable (Hashable)
 import GHC.Generics (Generic)
-import qualified Data.Equality.Graph as Eg
-import Control.Lens
 
 -- thoughtsf.
 -- select * from
@@ -140,21 +134,26 @@ instance (MonadTrans t, Monad (t m), MonadEgg anl l m) => MonadEgg anl l (Elevat
 
 type FDIdent = String
 
+data Unique = Unique String Int
+  deriving ( Eq, Ord, Show, Hashable, Generic)
 -- | Sql queries as predicate calculus. The query is a boolean predicate like
 -- forall x = (a,b,c), y = (a,h). InTable(x, Users) & InTable(y, Jobs) & b > 2
 data EGLang a
-    = LTuple { tupleVals :: [a]} -- tuple is a list of columns plus a synthetic tid. Intuitively tid is the memory location so we can reason about duplicates/updating/etc. There is always a function lookup_tuple_xyz(tid) equivalent to the tuple
-    | LFun String [a] -- function, e.g. a primary key is a function from id column to the tuple
-    | InTable a a -- predicates, is tuple in table
-    | IsNull a -- for notnull, a tuple can be null - this just sets all values null
-    | IsFound a
-    | BaseTable String
-    | AOp COp a a -- bin ops
+    = LFun Unique [a] -- partial function, e.g. a primary key is a function from id column to the tuple
+    | Equal a a -- | intersect model sets
+    | InDb a -- for notnull, a tuple can be null - this just sets all values null
+    | IndexTable a String -- We have fantasy indexes, so tuples not in the db can be indexed. Proofs over an IndexTable are vacuous unless InDb (IndexTable k tbl) == True. Without runtime checks this can be only checked via foreign key rules or by finding another InDb proof where we can instantiate existentials in a compatible way
+    -- | IsIn a String -- for notnull, a tuple can be null - this just sets all values null
+    | Var Unique
+    | And a a
+    | Or a a
+    -- | AOp COp a a -- bin ops
+    | Iff { constraint:: a, ifTrue :: a, ifFalse :: a} -- If constraint has at least one non-null value, then resolve to ifTrue with all constraint substitutions. Otherwise, resolve to all ifFalse substitutions  
     | CTrue
     | CFalse
     | CNot a -- negation
-    -- | a :=> a -- implication for proofs
-    | LSelectProjectJoin { producedTuple :: a, predicate :: a }
+    | Exists [Unique] a
+    -- | Aggr { groupExpr :: a, quantified :: [Unique], constraint :: a }
     -- | LAggregate {
     --     boundVars :: [a],
     --     selectAggKey :: [a],
@@ -166,6 +165,20 @@ data EGLang a
     deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable)
     deriving (Generic)
 
+
+-- sELct u.id, s.project from users u, project p wheRe p.user_id = u.id
+-- Exists [x1,x2, u, p] (Iff (Proj user_id (IndexTable x1 users) = p.projectid, WellDefined (IndexTable x1 users), WellDefined (IndexTable x2 project)) (
+--     Proj user_id (IndexTable x1 users
+-- ), p.project) Null)
+-- WellDefined (IndexTable x projects)=True -> WellDefined (IndexTable (userspk(Proj userid (IndexTable x projects))) users)=True
+-- u@(IndexTable x1 users) -> x1 = uerspk(Proj userid u)
+
+-- userspk(Proj x projectid) = x
+-- p@(IndexTable a project), Proj() -> userspk()
+-- IndexTable x2 user 
+--
+-- Exists [l,r] (Iff (Proj user_id l = r.projectid, IsIn l users, IsIn r project) (Proj id l, r.project) Null)
+-- Exists [l,r] (Iff (Proj user_id l = r.projectid, IsIn userpk(l.id) users, IsIn r project) (Proj id userid(r.userid), r.project) Null)
 data Mult = Zero | One | Many
   deriving (Eq, Ord, Show, Enum, Bounded)
 data Range a = Range { low :: a, high:: a}
@@ -190,12 +203,6 @@ multRange = appRange mult
 addRange :: Range Mult -> Range Mult -> Range Mult
 addRange = appRange max
 
-isBoolean :: EGLang a -> Bool
-isBoolean (IsNull {}) = True
-isBoolean (IsFound {}) = True
--- isBoolean (CNot {}) = True
-isBoolean _ = False
-
 
 pattern (:::) :: Ord a => a -> a -> Range a
 pattern l ::: r <- (splitLessThan -> Just (l,r))
@@ -219,12 +226,12 @@ ana (CNot (x ::: y)) =  flipR y ::: flipR x
   where
      flipR Zero = Many
      flipR _ = Zero
-ana (AOp CAnd l r) = multRange l r
-ana (AOp COr l r) = addRange l r
-ana b | isBoolean b = Zero ::: One
+-- ana (AOp CAnd l r) = multRange l r
+-- ana (AOp COr l r) = addRange l r
+-- ana b | isBoolean b = Zero ::: One
 -- ana (LFun _ ls) = Range (minimum (fmap low ls)) (maximum (fmap high ls))
 ana (LFun _ ls) = Zero ::: maximum (fmap high ls)
-ana (InTable _ a) = a
+-- ana (InTable _ a) = a
 ana _ = Zero ::: Many
 
 -- |x|=1 -> |x.y| = 1
@@ -234,15 +241,15 @@ ana _ = Zero ::: Many
 
 
 
-rules ::  forall m. (Analysis (Range Mult) EGLang, MonadState (EGraph (Range Mult) EGLang) m) => API.Rule EGLang m
-rules = API.forEachMatch @(Range Mult) [pat (InTable "l" "a") API..= pat CTrue] $ \toCid -> do
-    a <- toCid "a"
-    anal <- gets (^. Gl._class a . Gl._data)
-    case anal of
-        One ::: One -> do
-            -- ("l" API.~ "a") toCid
-            pure ()
-        _ -> pure ()
+-- rules ::  forall m. (Analysis (Range Mult) EGLang, MonadState (EGraph (Range Mult) EGLang) m) => API.Rule EGLang m
+-- rules = API.forEachMatch @(Range Mult) [pat (InTable "l" "a") API..= pat CTrue] $ \toCid -> do
+--     a <- toCid "a"
+--     anal <- gets (^. Gl._class a . Gl._data)
+--     case anal of
+--         One ::: One -> do
+--             -- ("l" API.~ "a") toCid
+--             pure ()
+--         _ -> pure ()
 deriving anyclass instance Hashable a => Hashable (EGLang a)
 data COp = CEq | CAnd | COr | CLT | CLTE
     deriving (Eq, Ord, Show ,Generic, Hashable)
