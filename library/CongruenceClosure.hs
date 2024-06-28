@@ -13,6 +13,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 -- | Use congruence closure+rewrite rules to reason about SQL queries
 module CongruenceClosure where
 
@@ -115,6 +116,8 @@ import GHC.Generics (Generic)
 --  Aggregates do not quite fit this thought process.
 --
 
+addTerm :: (MonadEgg l f m) => f ClassId -> m ClassId
+addTerm = liftEgg . add . coerce
 
 newtype EggT anl l a = MonadEgg { unMonadEgg :: StateT Int (EGraphM anl l ) a }
     deriving newtype (Functor, Applicative, Monad)
@@ -139,20 +142,20 @@ data Unique = Unique String Int
 -- | Sql queries as predicate calculus. The query is a boolean predicate like
 -- forall x = (a,b,c), y = (a,h). InTable(x, Users) & InTable(y, Jobs) & b > 2
 data EGLang a
-    = LFun Unique [a] -- partial function, e.g. a primary key is a function from id column to the tuple
+    = LFun { table :: String, indices :: [Int], args :: [a]} -- function from values computing table key 
     | Equal a a -- | intersect model sets
-    | InDb a -- for notnull, a tuple can be null - this just sets all values null
-    | IndexTable a String -- We have fantasy indexes, so tuples not in the db can be indexed. Proofs over an IndexTable are vacuous unless InDb (IndexTable k tbl) == True. Without runtime checks this can be only checked via foreign key rules or by finding another InDb proof where we can instantiate existentials in a compatible way
+    | InDb a String -- for notnull, a tuple can be null - this just sets all values null
+    | IndexTable a String -- We have fantasy indexes, so tuples not in the db can be indexed. Proofs over an IndexTable are vacuous unless InDb key tbl == True. Without runtime checks this can be only checked via foreign key rules or by finding another InDb proof where we can instantiate existentials in a compatible way
     -- | IsIn a String -- for notnull, a tuple can be null - this just sets all values null
     | Var Unique
     | And a a
     | Or a a
     -- | AOp COp a a -- bin ops
-    | Iff { constraint:: a, ifTrue :: a, ifFalse :: a} -- If constraint has at least one non-null value, then resolve to ifTrue with all constraint substitutions. Otherwise, resolve to all ifFalse substitutions  
+    -- | Iff { constraint:: a, ifTrue :: a, ifFalse :: a} -- If constraint has at least one non-null value, then resolve to ifTrue with all constraint substitutions. Otherwise, resolve to all ifFalse substitutions  
     | CTrue
     | CFalse
     | CNot a -- negation
-    | Exists [Unique] a
+    -- | Exists [Unique] a
     -- | Aggr { groupExpr :: a, quantified :: [Unique], constraint :: a }
     -- | LAggregate {
     --     boundVars :: [a],
@@ -164,6 +167,15 @@ data EGLang a
                             --The value is the aggregate result for the key. 
     deriving stock (Eq, Ord, Show, Functor, Foldable, Traversable)
     deriving (Generic)
+
+makeGraph2 :: (MonadReader (M.Map Q.Var ClassId) m, MonadEgg l EGLang m) => SQL -> m ClassId
+makeGraph2 sql = case sql of
+  ASPJ (SPJ {..}) -> undefined
+makeGraphExpr2 :: (MonadReader (M.Map Q.Var ClassId) m, MonadEgg l EGLang m) => Expr -> m ClassId
+makeGraphExpr2 ex = case ex of
+  BOp Q.Eql l r  -> addTerm =<< Equal <$> makeGraphExpr2 l <*> makeGraphExpr2 r
+
+
 
 
 -- sELct u.id, s.project from users u, project p wheRe p.user_id = u.id
@@ -224,13 +236,18 @@ ana CTrue = One ::: One
 ana CFalse = Zero ::: Zero
 ana (CNot (x ::: y)) =  flipR y ::: flipR x
   where
-     flipR Zero = Many
+     flipR Zero = One
      flipR _ = Zero
+ana (IndexTable k _) =  k
+ana (InDb _ _) =  Zero ::: One
+ana (Equal _ _) = Zero ::: One
+
 -- ana (AOp CAnd l r) = multRange l r
 -- ana (AOp COr l r) = addRange l r
 -- ana b | isBoolean b = Zero ::: One
 -- ana (LFun _ ls) = Range (minimum (fmap low ls)) (maximum (fmap high ls))
-ana (LFun _ ls) = Zero ::: maximum (fmap high ls)
+ana (LFun _ _ ls) = Zero ::: foldl1 mult (fmap high ls)
+
 -- ana (InTable _ a) = a
 ana _ = Zero ::: Many
 
@@ -322,8 +339,7 @@ instance (Analysis l SomeValue) => MonadEgg l SomeValue (EggT l SomeValue) where
         pure (SkolemID tag i)
     mergeVars l r = liftEgg (void $ merge l r)
 
-addTerm :: (MonadEgg l SomeValue m) => SomeValue ClassId -> m ClassId
-addTerm = liftEgg . add . coerce
+
 
 alignFields :: (Monad m, Foldable t, MonadEgg anl SomeValue m) => t AField -> ClassId -> ClassId -> m ()
 alignFields fields l r =
